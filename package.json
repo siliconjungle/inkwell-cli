@@ -28,6 +28,9 @@
     "url": "https://github.com/siliconjungle/inkwell-cli/issues"
   },
   "homepage": "https://inkwell.ing",
+  "publishConfig": {
+    "access": "public"
+  },
   "devDependencies": {
     "@types/node": "^22.19.19",
     "tsx": "^4.20.6",
