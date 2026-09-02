@@ -32,7 +32,7 @@ Your build directory must contain `index.html` at its root. Inkwell ignores deve
 inkwell deploy ./dist --game my-game
 ```
 
-This packages the directory, calculates a content hash, and uploads the immutable build to Inkwell.
+This creates a per-file SHA-256 manifest, uploads bounded batches, and publishes the immutable build to its isolated Inkwell origin.
 
 ## Development
 

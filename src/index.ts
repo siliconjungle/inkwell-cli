@@ -6,10 +6,13 @@ import { basename, join, relative, resolve, sep } from 'node:path';
 import { mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { zipSync } from 'fflate';
 
 const DEFAULT_API_URL = 'https://inkwell.ing';
 const MAX_BUILD_BYTES = 100 * 1024 * 1024;
+const MAX_BUILD_FILES = 2_000;
+const MAX_BUILD_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_BATCH_BYTES = 20 * 1024 * 1024;
+const MAX_BATCH_FILES = 20;
 const IGNORED_DIRECTORIES = new Set(['.git', '.next', '.vinext', 'node_modules']);
 
 type Config = {
@@ -22,6 +25,8 @@ type BuildFile = {
   archivePath: string;
   size: number;
 };
+
+type ManifestEntry = { path: string; size: number; sha256: string; contentType: string };
 
 function configPath() {
   const root = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
@@ -84,6 +89,15 @@ async function collectBuildFiles(root: string, current = root): Promise<BuildFil
   return files;
 }
 
+function contentType(path: string) {
+  const extension = path.split('.').pop()?.toLowerCase();
+  return ({
+    html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', mjs: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8',
+    json: 'application/json; charset=utf-8', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+    svg: 'image/svg+xml', wasm: 'application/wasm', mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav', mp4: 'video/mp4', woff: 'font/woff', woff2: 'font/woff2',
+  } as Record<string, string>)[extension || ''] || 'application/octet-stream';
+}
+
 async function packageBuild(directory: string) {
   const root = resolve(directory);
   const info = await stat(root).catch(() => null);
@@ -98,13 +112,15 @@ async function packageBuild(directory: string) {
   if (totalBytes > MAX_BUILD_BYTES) {
     throw new Error('The uncompressed build is over the 100 MB MVP limit.');
   }
+  if (files.length > MAX_BUILD_FILES) throw new Error(`The build has more than ${MAX_BUILD_FILES} files.`);
+  if (files.some((file) => file.size > MAX_BUILD_FILE_BYTES)) throw new Error('A build file is over the 20 MB per-file limit.');
 
-  const entries: Record<string, Uint8Array> = {};
-  for (const file of files) entries[file.archivePath] = await readFile(file.absolutePath);
-
-  const archive = zipSync(entries, { level: 6 });
-  const digest = createHash('sha256').update(archive).digest('hex');
-  return { archive, digest, fileCount: files.length };
+  const manifest: ManifestEntry[] = [];
+  for (const file of files) {
+    const bytes = await readFile(file.absolutePath);
+    manifest.push({ path: file.archivePath, size: file.size, sha256: createHash('sha256').update(bytes).digest('hex'), contentType: contentType(file.archivePath) });
+  }
+  return { files, manifest, totalBytes };
 }
 
 async function apiRequest(path: string, init: RequestInit = {}) {
@@ -125,7 +141,7 @@ async function apiRequest(path: string, init: RequestInit = {}) {
 
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {
-    const message = typeof body.message === 'string' ? body.message : `Request failed (${response.status})`;
+    const message = typeof body.error === 'string' ? body.error : typeof body.message === 'string' ? body.message : `Request failed (${response.status})`;
     throw new Error(message);
   }
   return body;
@@ -134,7 +150,7 @@ async function apiRequest(path: string, init: RequestInit = {}) {
 async function login(args: string[]) {
   let token = firstPositional(args) || process.env.INKWELL_TOKEN;
   if (!token) {
-    console.log('Create a deploy token at https://inkwell.ing/account/tokens');
+    console.log('Create an API key at https://inkwell.ing/developer/keys');
     const prompt = createInterface({ input, output });
     token = (await prompt.question('Paste token: ')).trim();
     prompt.close();
@@ -163,19 +179,42 @@ async function deploy(args: string[]) {
 
   process.stdout.write(`Packaging ${basename(resolve(directory))}... `);
   const build = await packageBuild(directory);
-  console.log(`${build.fileCount} files`);
+  console.log(`${build.files.length} files, ${(build.totalBytes / 1024 / 1024).toFixed(1)} MB`);
 
-  const result = await apiRequest(`/api/v1/games/${encodeURIComponent(game)}/builds`, {
+  const created = await apiRequest(`/api/v1/games/${encodeURIComponent(game)}/builds`, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/zip',
-      'x-inkwell-content-sha256': build.digest,
-    },
-    body: Buffer.from(build.archive),
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ manifest: build.manifest }),
   });
+  const buildRecord = created.build as { publicId?: unknown } | undefined;
+  if (!buildRecord || typeof buildRecord.publicId !== 'string') throw new Error('Inkwell did not return a build ID.');
+  if (!created.alreadyUploaded) {
+    const batches: BuildFile[][] = [];
+    let batch: BuildFile[] = [];
+    let batchBytes = 0;
+    for (const file of build.files) {
+      if (batch.length && (batch.length >= MAX_BATCH_FILES || batchBytes + file.size > MAX_BATCH_BYTES)) {
+        batches.push(batch); batch = []; batchBytes = 0;
+      }
+      batch.push(file); batchBytes += file.size;
+    }
+    if (batch.length) batches.push(batch);
+
+    for (let index = 0; index < batches.length; index += 1) {
+      process.stdout.write(`Uploading ${index + 1}/${batches.length}...\r`);
+      const form = new FormData();
+      for (const file of batches[index]!) {
+        form.append('path', file.archivePath);
+        form.append('file', new Blob([await readFile(file.absolutePath)], { type: contentType(file.archivePath) }), file.archivePath);
+      }
+      await apiRequest(`/api/v1/builds/${buildRecord.publicId}/files`, { method: 'POST', body: form });
+    }
+    output.write('\n');
+  }
+  const result = created.alreadyUploaded ? created : await apiRequest(`/api/v1/builds/${buildRecord.publicId}/finalize`, { method: 'POST' });
 
   console.log('Deployment complete.');
-  if (typeof result.url === 'string') console.log(result.url);
+  if (typeof result.pageUrl === 'string') console.log(result.pageUrl);
 }
 
 function help() {

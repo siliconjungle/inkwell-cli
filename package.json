@@ -28,9 +28,6 @@
     "url": "https://github.com/siliconjungle/inkwell-cli/issues"
   },
   "homepage": "https://inkwell.ing",
-  "dependencies": {
-    "fflate": "^0.8.2"
-  },
   "devDependencies": {
     "@types/node": "^22.19.19",
     "tsx": "^4.20.6",
