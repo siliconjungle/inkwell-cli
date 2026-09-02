@@ -123,14 +123,22 @@ async function packageBuild(directory: string) {
   return { files, manifest, totalBytes };
 }
 
-async function apiRequest(path: string, init: RequestInit = {}) {
+async function apiRequest(
+  path: string,
+  init: RequestInit = {},
+  credentials: { token?: string; apiUrl?: string } = {},
+) {
   const config = await readConfig();
-  const token = process.env.INKWELL_TOKEN || config.token;
+  const token = credentials.token || process.env.INKWELL_TOKEN || config.token;
   if (!token) {
     throw new Error('Not signed in. Run `inkwell login` or set INKWELL_TOKEN.');
   }
 
-  const apiUrl = process.env.INKWELL_API_URL || config.apiUrl || DEFAULT_API_URL;
+  const apiUrl =
+    credentials.apiUrl ||
+    process.env.INKWELL_API_URL ||
+    config.apiUrl ||
+    DEFAULT_API_URL;
   const response = await fetch(new URL(path, apiUrl), {
     ...init,
     headers: {
@@ -142,7 +150,12 @@ async function apiRequest(path: string, init: RequestInit = {}) {
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {
     const message = typeof body.error === 'string' ? body.error : typeof body.message === 'string' ? body.message : `Request failed (${response.status})`;
-    throw new Error(message);
+    const retryAfter = response.headers.get('retry-after');
+    throw new Error(
+      response.status === 429 && retryAfter
+        ? `${message} Retry after ${retryAfter} seconds.`
+        : message,
+    );
   }
   return body;
 }
@@ -158,8 +171,16 @@ async function login(args: string[]) {
   if (!token) throw new Error('A deploy token is required.');
 
   const current = await readConfig();
+  const apiUrl = process.env.INKWELL_API_URL || current.apiUrl || DEFAULT_API_URL;
+  const profile = await apiRequest('/api/v1/me', {}, { token, apiUrl });
   await writeConfig({ ...current, token });
-  console.log('Signed in to Inkwell.');
+  const identity =
+    typeof profile.username === 'string'
+      ? ` as @${profile.username}`
+      : typeof profile.email === 'string'
+        ? ` as ${profile.email}`
+        : '';
+  console.log(`Signed in to Inkwell${identity}.`);
 }
 
 async function logout() {
