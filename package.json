@@ -1,5 +1,5 @@
 {
-  "name": "@inkwellgame/cli",
+  "name": "@silicon-jungle/inkwell-cli",
   "version": "0.0.1",
   "description": "Deploy browser games to Inkwell from the command line.",
   "license": "MIT",

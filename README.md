@@ -2,16 +2,12 @@
 
 The official command-line client for deploying static browser games to [Inkwell](https://inkwell.ing).
 
-> **Pre-release:** the package and deployment API are under active development. The CLI is not published to npm yet.
-
-## Install from source
+## Install
 
 Requires Node.js 22.13 or newer.
 
 ```bash
-npm install
-npm run build
-npm link
+npm install --global @silicon-jungle/inkwell-cli
 ```
 
 ## Sign in
