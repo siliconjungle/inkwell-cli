@@ -8,9 +8,59 @@ import {
   bundleBackend,
   loadGameConfig,
   packageBuild,
+  requestGithubActionsCredentials,
   validateSecretName,
   validateSecretValues,
 } from "./index.js";
+
+void test("exchanges GitHub Actions OIDC for a short-lived game credential", async () => {
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    requests.push({ url, init });
+    if (url.startsWith("https://oidc.actions.example/token")) {
+      return Response.json({ value: "signed-github-identity" });
+    }
+    return Response.json({
+      token: "ink_gha_temporary",
+      deployment: { id: "deploy123", target: "production" },
+    });
+  }) as typeof fetch;
+
+  const credentials = await requestGithubActionsCredentials("pathweaver", {
+    requestUrl: "https://oidc.actions.example/token?api-version=1",
+    requestToken: "runner-request-token",
+    apiUrl: "https://inkwell.example",
+    fetcher,
+  });
+
+  assert.deepEqual(credentials, {
+    token: "ink_gha_temporary",
+    apiUrl: "https://inkwell.example",
+    deploymentId: "deploy123",
+    target: "production",
+  });
+  assert.match(requests[0]!.url, /audience=inkwell-deploy/);
+  assert.equal(
+    new Headers(requests[0]!.init?.headers).get("authorization"),
+    "Bearer runner-request-token",
+  );
+  assert.equal(requests[1]!.url, "https://inkwell.example/api/v1/github/actions/exchange");
+  assert.deepEqual(JSON.parse(String(requests[1]!.init?.body)), {
+    game: "pathweaver",
+    token: "signed-github-identity",
+  });
+});
+
+void test("does not attempt OIDC outside GitHub Actions", async () => {
+  assert.equal(
+    await requestGithubActionsCredentials("pathweaver", {
+      requestUrl: "",
+      requestToken: "",
+    }),
+    null,
+  );
+});
 
 void test("validates server secret names and values before sending them", () => {
   assert.equal(validateSecretName("STRIPE_API_KEY"), "STRIPE_API_KEY");
