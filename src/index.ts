@@ -31,6 +31,13 @@ type Config = {
   apiUrl?: string;
 };
 
+type GithubActionsCredentials = {
+  token: string;
+  apiUrl: string;
+  deploymentId: string;
+  target: "production" | "preview";
+};
+
 type BuildFile = {
   absolutePath: string;
   archivePath: string;
@@ -339,6 +346,82 @@ async function apiRequest(
   return body;
 }
 
+export async function requestGithubActionsCredentials(
+  game: string,
+  options: {
+    requestUrl?: string;
+    requestToken?: string;
+    apiUrl?: string;
+    fetcher?: typeof fetch;
+  } = {},
+): Promise<GithubActionsCredentials | null> {
+  const requestUrl = options.requestUrl || process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+  const requestToken = options.requestToken || process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+  if (!requestUrl || !requestToken) return null;
+  const fetcher = options.fetcher || fetch;
+  const apiUrl = options.apiUrl || process.env.INKWELL_API_URL || DEFAULT_API_URL;
+  const oidcUrl = new URL(requestUrl);
+  oidcUrl.searchParams.set("audience", "inkwell-deploy");
+  const oidcResponse = await fetcher(oidcUrl, {
+    headers: { authorization: `Bearer ${requestToken}` },
+  });
+  const oidcBody = (await oidcResponse.json().catch(() => ({}))) as {
+    value?: unknown;
+    message?: unknown;
+  };
+  if (!oidcResponse.ok || typeof oidcBody.value !== "string") {
+    throw new Error(
+      typeof oidcBody.message === "string"
+        ? `GitHub OIDC failed: ${oidcBody.message}`
+        : "GitHub did not issue an Actions identity token.",
+    );
+  }
+  const exchangeResponse = await fetcher(new URL("/api/v1/github/actions/exchange", apiUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ game, token: oidcBody.value }),
+  });
+  const exchange = (await exchangeResponse.json().catch(() => ({}))) as {
+    token?: unknown;
+    error?: unknown;
+    deployment?: { id?: unknown; target?: unknown };
+  };
+  if (
+    !exchangeResponse.ok ||
+    typeof exchange.token !== "string" ||
+    typeof exchange.deployment?.id !== "string" ||
+    (exchange.deployment.target !== "production" && exchange.deployment.target !== "preview")
+  ) {
+    throw new Error(
+      typeof exchange.error === "string"
+        ? exchange.error
+        : "Inkwell rejected the GitHub Actions identity.",
+    );
+  }
+  return {
+    token: exchange.token,
+    apiUrl,
+    deploymentId: exchange.deployment.id,
+    target: exchange.deployment.target,
+  };
+}
+
+async function finishGithubActionsDeployment(
+  credentials: GithubActionsCredentials,
+  status: "succeeded" | "failed" | "cancelled",
+  error?: string,
+) {
+  await apiRequest(
+    `/api/v1/github/actions/deployments/${encodeURIComponent(credentials.deploymentId)}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status, ...(error ? { error: error.slice(0, 1_000) } : {}) }),
+    },
+    credentials,
+  );
+}
+
 async function login(args: string[]) {
   let token = firstPositional(args) || process.env.INKWELL_TOKEN;
   if (!token) {
@@ -549,82 +632,123 @@ async function deploy(args: string[]) {
   const build = await packageBuild(directory);
   console.log(`${build.files.length} files, ${(build.totalBytes / 1024 / 1024).toFixed(1)} MB`);
 
-  const created = await apiRequest(`/api/v1/games/${encodeURIComponent(game)}/builds`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ manifest: build.manifest }),
-  });
-  const buildRecord = created.build as { publicId?: unknown } | undefined;
-  if (!buildRecord || typeof buildRecord.publicId !== "string")
-    throw new Error("Inkwell did not return a build ID.");
-  if (!created.alreadyUploaded) {
-    const batches: BuildFile[][] = [];
-    let batch: BuildFile[] = [];
-    let batchBytes = 0;
-    for (const file of build.files) {
-      if (
-        batch.length &&
-        (batch.length >= MAX_BATCH_FILES || batchBytes + file.size > MAX_BATCH_BYTES)
-      ) {
-        batches.push(batch);
-        batch = [];
-        batchBytes = 0;
-      }
-      batch.push(file);
-      batchBytes += file.size;
-    }
-    if (batch.length) batches.push(batch);
+  const configured = await readConfig();
+  const hasDeployToken = Boolean(process.env.INKWELL_TOKEN || configured.token);
+  const actionsCredentials = hasDeployToken
+    ? null
+    : await requestGithubActionsCredentials(game);
+  const credentials = actionsCredentials || {};
 
-    for (let index = 0; index < batches.length; index += 1) {
-      process.stdout.write(`Uploading ${index + 1}/${batches.length}...\r`);
-      const form = new FormData();
-      for (const file of batches[index]!) {
-        form.append("path", file.archivePath);
-        form.append(
-          "file",
-          new Blob([await readFile(file.absolutePath)], { type: contentType(file.archivePath) }),
-          file.archivePath,
-        );
-      }
-      await apiRequest(`/api/v1/builds/${buildRecord.publicId}/files`, {
-        method: "POST",
-        body: form,
-      });
-    }
-    output.write("\n");
-  }
-  const result = created.alreadyUploaded
-    ? created
-    : await apiRequest(`/api/v1/builds/${buildRecord.publicId}/finalize`, { method: "POST" });
-
-  console.log("Deployment complete.");
-  if (typeof result.pageUrl === "string") console.log(result.pageUrl);
-
-  if (project?.config.backend) {
-    process.stdout.write("Bundling server code... ");
-    const backend = await bundleBackend(project.root, project.config.backend.entry);
-    console.log(`${(backend.bytes.byteLength / 1024).toFixed(1)} KiB`);
-    const backendConfig = project.config.backend;
-    const deployed = await apiRequest(
-      `/api/v1/games/${encodeURIComponent(game)}/backend/deployments`,
+  try {
+    const created = await apiRequest(
+      `/api/v1/games/${encodeURIComponent(game)}/builds`,
       {
         method: "POST",
-        headers: {
-          "content-type": "text/javascript; charset=utf-8",
-          "x-inkwell-content-sha256": backend.sha256,
-          "x-inkwell-region": backendConfig.region || "syd",
-          "x-inkwell-max-connections": String(backendConfig.maxConnections || 100),
-          "x-inkwell-memory-mb": String(backendConfig.resources?.memoryMb || 256),
-          "x-inkwell-shared-cpus": String(backendConfig.resources?.sharedCpus || 1),
-        },
-        body: backend.bytes.slice().buffer as ArrayBuffer,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ manifest: build.manifest }),
       },
+      credentials,
+    );
+    const buildRecord = created.build as { publicId?: unknown } | undefined;
+    if (!buildRecord || typeof buildRecord.publicId !== "string") {
+      throw new Error("Inkwell did not return a build ID.");
+    }
+    if (!created.alreadyUploaded) {
+      const batches: BuildFile[][] = [];
+      let batch: BuildFile[] = [];
+      let batchBytes = 0;
+      for (const file of build.files) {
+        if (
+          batch.length &&
+          (batch.length >= MAX_BATCH_FILES || batchBytes + file.size > MAX_BATCH_BYTES)
+        ) {
+          batches.push(batch);
+          batch = [];
+          batchBytes = 0;
+        }
+        batch.push(file);
+        batchBytes += file.size;
+      }
+      if (batch.length) batches.push(batch);
+
+      for (let index = 0; index < batches.length; index += 1) {
+        process.stdout.write(`Uploading ${index + 1}/${batches.length}...\r`);
+        const form = new FormData();
+        for (const file of batches[index]!) {
+          form.append("path", file.archivePath);
+          form.append(
+            "file",
+            new Blob([await readFile(file.absolutePath)], {
+              type: contentType(file.archivePath),
+            }),
+            file.archivePath,
+          );
+        }
+        await apiRequest(
+          `/api/v1/builds/${buildRecord.publicId}/files`,
+          { method: "POST", body: form },
+          credentials,
+        );
+      }
+      output.write("\n");
+    }
+
+    if (project?.config.backend && actionsCredentials?.target !== "preview") {
+      process.stdout.write("Bundling server code... ");
+      const backend = await bundleBackend(project.root, project.config.backend.entry);
+      console.log(`${(backend.bytes.byteLength / 1024).toFixed(1)} KiB`);
+      const backendConfig = project.config.backend;
+      const deployed = await apiRequest(
+        `/api/v1/games/${encodeURIComponent(game)}/backend/deployments`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "text/javascript; charset=utf-8",
+            "x-inkwell-content-sha256": backend.sha256,
+            "x-inkwell-region": backendConfig.region || "syd",
+            "x-inkwell-max-connections": String(backendConfig.maxConnections || 100),
+            "x-inkwell-memory-mb": String(backendConfig.resources?.memoryMb || 256),
+            "x-inkwell-shared-cpus": String(backendConfig.resources?.sharedCpus || 1),
+          },
+          body: backend.bytes.slice().buffer as ArrayBuffer,
+        },
+        credentials,
+      );
+      console.log(
+        deployed.activation === "after-current-server-stops"
+          ? "Server deployment uploaded; it will activate after the current server stops."
+          : "Server deployment active.",
+      );
+    }
+    if (project?.config.backend && actionsCredentials?.target === "preview") {
+      console.log("Preview uses the current production server; server code was not replaced.");
+    }
+
+    // Finalization is the publication boundary. Server bundling and upload run
+    // first so a failed server build cannot publish a client that depends on it.
+    const result = await apiRequest(
+      `/api/v1/builds/${buildRecord.publicId}/finalize`,
+      { method: "POST" },
+      credentials,
     );
     console.log(
-      deployed.activation === "after-current-server-stops"
-        ? "Server deployment uploaded; it will activate after the current server stops."
-        : "Server deployment active.",
+      actionsCredentials
+        ? `${actionsCredentials.target === "production" ? "Production" : "Preview"} deployment complete.`
+        : "Deployment complete.",
     );
+    if (typeof result.pageUrl === "string") console.log(result.pageUrl);
+    if (actionsCredentials) {
+      await finishGithubActionsDeployment(actionsCredentials, "succeeded");
+    }
+  } catch (error) {
+    if (actionsCredentials) {
+      await finishGithubActionsDeployment(
+        actionsCredentials,
+        "failed",
+        error instanceof Error ? error.message : String(error),
+      ).catch(() => undefined);
+    }
+    throw error;
   }
 }
 
@@ -643,7 +767,9 @@ Usage:
 
 Environment:
   INKWELL_TOKEN     Override the saved deploy token
-  INKWELL_API_URL   Override https://inkwell.ing`);
+  INKWELL_API_URL   Override https://inkwell.ing
+
+GitHub Actions automatically uses OIDC when no INKWELL_TOKEN is set.`);
 }
 
 async function main() {
