@@ -20,6 +20,7 @@ const IGNORED_DIRECTORIES = new Set([".git", ".next", ".vinext", "node_modules"]
 const SENSITIVE_BUILD_FILES = new Set([".dev.vars", ".npmrc"]);
 const SECRET_NAME = /^[A-Z_][A-Z0-9_]*$/;
 const RESERVED_SECRET_NAMES = new Set(["NODE_OPTIONS", "PORT", "PATH", "HOME", "HOSTNAME", "PWD"]);
+const RESERVED_SECRET_PREFIXES = ["INKWELL_", "FLY_", "NODE_", "LD_", "DYLD_"];
 const CONFIG_FILES = ["inkwell.config.ts", "inkwell.config.mjs", "inkwell.config.js"];
 const MAX_BACKEND_BUNDLE_BYTES = 10 * 1024 * 1024;
 const MAX_SECRET_VALUE_BYTES = 64 * 1024;
@@ -381,8 +382,7 @@ export function validateSecretName(name: string) {
   if (
     !SECRET_NAME.test(name) ||
     name.length > 128 ||
-    name.startsWith("INKWELL_") ||
-    name.startsWith("FLY_") ||
+    RESERVED_SECRET_PREFIXES.some((prefix) => name.startsWith(prefix)) ||
     RESERVED_SECRET_NAMES.has(name)
   ) {
     throw new Error(

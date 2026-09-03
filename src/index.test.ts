@@ -17,7 +17,15 @@ void test("validates server secret names and values before sending them", () => 
   assert.deepEqual(validateSecretValues({ TOKEN: "opaque=value" }), {
     TOKEN: "opaque=value",
   });
-  for (const name of ["INKWELL_GAME_ID", "FLY_API_TOKEN", "NODE_OPTIONS", "bad"]) {
+  for (const name of [
+    "INKWELL_GAME_ID",
+    "FLY_API_TOKEN",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "LD_PRELOAD",
+    "DYLD_INSERT_LIBRARIES",
+    "bad",
+  ]) {
     assert.throws(() => validateSecretName(name));
   }
   assert.throws(() => validateSecretValues({ TOKEN: "" }));
