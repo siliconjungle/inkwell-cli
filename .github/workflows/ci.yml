@@ -21,8 +21,11 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm install --global npm@latest
       - run: npm ci
+      - run: npm test
       - run: npm run check
       - run: npm run build
+      - run: npm pack --dry-run
+      - run: npm audit --audit-level=high
       - name: Publish new package version
         if: github.event_name == 'push'
         shell: bash
