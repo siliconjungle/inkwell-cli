@@ -22,6 +22,8 @@ const SECRET_NAME = /^[A-Z_][A-Z0-9_]*$/;
 const RESERVED_SECRET_NAMES = new Set(["NODE_OPTIONS", "PORT", "PATH", "HOME", "HOSTNAME", "PWD"]);
 const CONFIG_FILES = ["inkwell.config.ts", "inkwell.config.mjs", "inkwell.config.js"];
 const MAX_BACKEND_BUNDLE_BYTES = 10 * 1024 * 1024;
+const MAX_SECRET_VALUE_BYTES = 64 * 1024;
+const MAX_SECRETS_PAYLOAD_BYTES = 256 * 1024;
 
 type Config = {
   token?: string;
@@ -392,8 +394,14 @@ export function validateSecretName(name: string) {
 
 async function readAllStdin() {
   const chunks: Buffer[] = [];
+  let total = 0;
   for await (const chunk of input) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += bytes.byteLength;
+    if (total > MAX_SECRET_VALUE_BYTES) {
+      throw new Error("Secret value is over the 64 KiB limit.");
+    }
+    chunks.push(bytes);
   }
   return Buffer.concat(chunks)
     .toString("utf8")
@@ -447,7 +455,7 @@ export function validateSecretValues(values: Record<string, string>) {
     validateSecretName(name);
     if (!value.length) throw new Error(`${name} has an empty value.`);
     if (value.includes("\0")) throw new Error(`${name} contains a null byte.`);
-    if (Buffer.byteLength(value) > 64 * 1024) {
+    if (Buffer.byteLength(value) > MAX_SECRET_VALUE_BYTES) {
       throw new Error(`${name} is over the 64 KiB per-secret limit.`);
     }
   }
@@ -455,10 +463,14 @@ export function validateSecretValues(values: Record<string, string>) {
 }
 
 async function uploadSecrets(game: string, secrets: Record<string, string>) {
+  const body = JSON.stringify({ secrets: validateSecretValues(secrets) });
+  if (Buffer.byteLength(body) > MAX_SECRETS_PAYLOAD_BYTES) {
+    throw new Error("The combined secrets payload is over the 256 KiB limit.");
+  }
   const result = await apiRequest(`/api/v1/games/${encodeURIComponent(game)}/backend/secrets`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ secrets: validateSecretValues(secrets) }),
+    body,
   });
   const stored = Array.isArray(result.secrets)
     ? result.secrets.length
@@ -503,6 +515,10 @@ async function secretsCommand(args: string[]) {
           return index === 0 || !["--game", "-g"].includes(actionArgs[index - 1] || "");
         }) || ".env";
       const absolutePath = resolve(path);
+      const info = await stat(absolutePath);
+      if (!info.isFile() || info.size > MAX_SECRETS_PAYLOAD_BYTES) {
+        throw new Error("The .env file must be a file no larger than 256 KiB.");
+      }
       const values = parseDotenv(await readFile(absolutePath, "utf8"));
       await uploadSecrets(game, values);
       console.log(
