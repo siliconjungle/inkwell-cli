@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, relative, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { access, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -811,7 +812,18 @@ async function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+export function isMainModule(moduleUrl: string, executablePath = process.argv[1]) {
+  if (!executablePath) return false;
+  try {
+    // npm and npx launch package binaries through a symlink in node_modules/.bin.
+    // Compare canonical filesystem paths so the CLI still starts in that normal case.
+    return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(executablePath);
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule(import.meta.url)) {
   main().catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`Error: ${message}`);
