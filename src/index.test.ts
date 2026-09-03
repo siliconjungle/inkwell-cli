@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, truncate, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   bundleBackend,
   createUploadBatches,
+  isMainModule,
   loadGameConfig,
   packageBuild,
   requestGithubActionsCredentials,
@@ -15,6 +17,26 @@ import {
 } from "./index.js";
 
 const MEBIBYTE = 1024 * 1024;
+
+void test("recognizes npm-style symlinked package binaries as the main module", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "inkwell-cli-entrypoint-test-"));
+  try {
+    const modulePath = join(directory, "dist", "index.js");
+    const executablePath = join(directory, "node_modules", ".bin", "inkwell");
+    await mkdir(join(directory, "dist"), { recursive: true });
+    await mkdir(join(directory, "node_modules", ".bin"), { recursive: true });
+    await writeFile(modulePath, "");
+    await symlink(modulePath, executablePath);
+
+    assert.equal(isMainModule(pathToFileURL(modulePath).href, executablePath), true);
+    assert.equal(
+      isMainModule(pathToFileURL(join(directory, "other.js")).href, executablePath),
+      false,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 void test("exchanges GitHub Actions OIDC for a short-lived game credential", async () => {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
