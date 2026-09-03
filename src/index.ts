@@ -376,8 +376,10 @@ export async function requestGithubActionsCredentials(
     fetcher?: typeof fetch;
   } = {},
 ): Promise<GithubActionsCredentials | null> {
-  const requestUrl = options.requestUrl || process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
-  const requestToken = options.requestToken || process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+  const requestUrl =
+    options.requestUrl ?? process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+  const requestToken =
+    options.requestToken ?? process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
   if (!requestUrl || !requestToken) return null;
   const fetcher = options.fetcher || fetch;
   const apiUrl = options.apiUrl || process.env.INKWELL_API_URL || DEFAULT_API_URL;
