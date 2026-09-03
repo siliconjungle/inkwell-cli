@@ -11,10 +11,10 @@ import { parse as parseDotenv } from "dotenv";
 import { build as esbuild } from "esbuild";
 
 const DEFAULT_API_URL = "https://inkwell.ing";
-const MAX_BUILD_BYTES = 100 * 1024 * 1024;
+const MAX_BUILD_BYTES = 1024 * 1024 * 1024;
 const MAX_BUILD_FILES = 2_000;
-const MAX_BUILD_FILE_BYTES = 20 * 1024 * 1024;
-const MAX_BATCH_BYTES = 20 * 1024 * 1024;
+const MAX_BUILD_FILE_BYTES = 32 * 1024 * 1024;
+const MAX_BATCH_BYTES = 32 * 1024 * 1024;
 const MAX_BATCH_FILES = 20;
 const IGNORED_DIRECTORIES = new Set([".git", ".next", ".vinext", "node_modules"]);
 const SENSITIVE_BUILD_FILES = new Set([".dev.vars", ".npmrc"]);
@@ -168,12 +168,12 @@ export async function packageBuild(directory: string) {
 
   const totalBytes = files.reduce((total, file) => total + file.size, 0);
   if (totalBytes > MAX_BUILD_BYTES) {
-    throw new Error("The uncompressed build is over the 100 MB MVP limit.");
+    throw new Error("The uncompressed build is over the 1 GiB limit.");
   }
   if (files.length > MAX_BUILD_FILES)
     throw new Error(`The build has more than ${MAX_BUILD_FILES} files.`);
   if (files.some((file) => file.size > MAX_BUILD_FILE_BYTES))
-    throw new Error("A build file is over the 20 MB per-file limit.");
+    throw new Error("A build file is over the 32 MiB per-file limit.");
 
   const manifest: ManifestEntry[] = [];
   for (const file of files) {
@@ -186,6 +186,27 @@ export async function packageBuild(directory: string) {
     });
   }
   return { files, manifest, totalBytes };
+}
+
+export function createUploadBatches(files: BuildFile[]) {
+  const batches: BuildFile[][] = [];
+  let batch: BuildFile[] = [];
+  let batchBytes = 0;
+  for (const file of files) {
+    if (
+      batch.length &&
+      (batch.length >= MAX_BATCH_FILES ||
+        batchBytes + file.size > MAX_BATCH_BYTES)
+    ) {
+      batches.push(batch);
+      batch = [];
+      batchBytes = 0;
+    }
+    batch.push(file);
+    batchBytes += file.size;
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
 }
 
 async function findConfig(root = process.cwd()) {
@@ -654,22 +675,7 @@ async function deploy(args: string[]) {
       throw new Error("Inkwell did not return a build ID.");
     }
     if (!created.alreadyUploaded) {
-      const batches: BuildFile[][] = [];
-      let batch: BuildFile[] = [];
-      let batchBytes = 0;
-      for (const file of build.files) {
-        if (
-          batch.length &&
-          (batch.length >= MAX_BATCH_FILES || batchBytes + file.size > MAX_BATCH_BYTES)
-        ) {
-          batches.push(batch);
-          batch = [];
-          batchBytes = 0;
-        }
-        batch.push(file);
-        batchBytes += file.size;
-      }
-      if (batch.length) batches.push(batch);
+      const batches = createUploadBatches(build.files);
 
       for (let index = 0; index < batches.length; index += 1) {
         process.stdout.write(`Uploading ${index + 1}/${batches.length}...\r`);
