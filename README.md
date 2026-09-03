@@ -27,7 +27,7 @@ and that single deployment run.
 
 ## Deploy a game
 
-Your build directory must contain `index.html` at its root. Inkwell ignores development output such as `.git`, `.next`, and `node_modules` and rejects uncompressed builds over 100 MB.
+Your build directory must contain `index.html` at its root. Inkwell ignores development output such as `.git`, `.next`, and `node_modules`. A build may contain up to 2,000 files and 1 GiB uncompressed, with a 32 MiB limit for each file.
 
 ```bash
 inkwell deploy ./dist --game my-game

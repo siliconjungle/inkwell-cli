@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
   bundleBackend,
+  createUploadBatches,
   loadGameConfig,
   packageBuild,
   requestGithubActionsCredentials,
   validateSecretName,
   validateSecretValues,
 } from "./index.js";
+
+const MEBIBYTE = 1024 * 1024;
 
 void test("exchanges GitHub Actions OIDC for a short-lived game credential", async () => {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
@@ -89,6 +92,52 @@ void test("refuses to package dotenv files anywhere in a browser build", async (
     await mkdir(join(directory, "nested"));
     await writeFile(join(directory, "nested", ".env.production"), "SECRET=value");
     await assert.rejects(packageBuild(directory), /Refusing to package/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+void test("accepts Pathweaver-sized files and keeps upload batches within 32 MiB", () => {
+  const files = [
+    { absolutePath: "/a", archivePath: "models/nibs.glb", size: 27_197_228 },
+    { absolutePath: "/b", archivePath: "textures/one.png", size: 3_700_000 },
+    { absolutePath: "/c", archivePath: "textures/two.png", size: 3_600_000 },
+  ];
+  const batches = createUploadBatches(files);
+  assert.deepEqual(
+    batches.map((batch) => batch.map((file) => file.archivePath)),
+    [["models/nibs.glb", "textures/one.png"], ["textures/two.png"]],
+  );
+  assert.ok(
+    batches.every(
+      (batch) => batch.reduce((total, file) => total + file.size, 0) <= 32 * MEBIBYTE,
+    ),
+  );
+});
+
+void test("rejects a build above 1 GiB before reading sparse asset files", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "inkwell-large-build-test-"));
+  try {
+    await writeFile(join(directory, "index.html"), "x");
+    for (let index = 0; index < 32; index += 1) {
+      const path = join(directory, `chunk-${index}.bin`);
+      await writeFile(path, "");
+      await truncate(path, 32 * MEBIBYTE);
+    }
+    await assert.rejects(packageBuild(directory), /over the 1 GiB limit/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+void test("rejects an individual file above 32 MiB", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "inkwell-file-limit-test-"));
+  try {
+    await writeFile(join(directory, "index.html"), "x");
+    const path = join(directory, "oversized.bin");
+    await writeFile(path, "");
+    await truncate(path, 32 * MEBIBYTE + 1);
+    await assert.rejects(packageBuild(directory), /32 MiB per-file limit/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
