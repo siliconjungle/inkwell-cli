@@ -19,13 +19,21 @@ jobs:
           node-version: 24
           cache: npm
           registry-url: https://registry.npmjs.org
-      - run: npm install --global npm@latest
-      - run: npm ci
+      - run: npm install --global npm@latest --no-audit
+      - run: npm ci --no-audit
       - run: npm test
       - run: npm run check
       - run: npm run build
       - run: npm pack --dry-run
-      - run: npm audit --audit-level=high
+      - name: Audit locked dependencies before publication
+        run: node scripts/audit-dependencies.mjs
+      - name: Retain dependency security evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dependency-audit
+          path: artifacts/dependency-audit/
+          if-no-files-found: ignore
       - name: Publish new package version
         if: github.event_name == 'push'
         shell: bash

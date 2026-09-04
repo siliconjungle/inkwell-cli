@@ -1,6 +1,6 @@
 {
   "name": "@silicon-jungle/inkwell-cli",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Deploy browser games to Inkwell from the command line.",
   "license": "MIT",
   "type": "module",
@@ -18,7 +18,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test src/*.test.ts",
+    "test": "tsx --test src/*.test.ts && node --test scripts/*.test.mjs",
     "dev": "node --import=tsx src/index.ts"
   },
   "repository": {

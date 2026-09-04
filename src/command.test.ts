@@ -14,6 +14,50 @@ const cli = fileURLToPath(new URL('./index.ts', import.meta.url));
 const loader = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
 const buildId = 'abcdef123456';
 
+void test('real CLI retries only the interrupted upload and publishes once', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'inkwell-command-retry-'));
+  let uploads = 0, created = 0, published = 0;
+  let permanent = false;
+  const html = '<h1>Retry-safe game</h1>';
+  const server = createServer(async (request, response) => {
+    const bytes: Buffer[] = [];
+    for await (const chunk of request) bytes.push(Buffer.from(chunk));
+    assert.equal(request.headers.authorization, 'Bearer local-command-test');
+    response.setHeader('content-type', 'application/json');
+    if (request.url?.endsWith('/builds')) {
+      created++;
+      response.end(JSON.stringify({build: {publicId: buildId}, alreadyUploaded: false}));
+    } else if (request.url?.endsWith('/files')) {
+      assert.equal(request.method, 'PUT');
+      const form = await new Response(Buffer.concat(bytes), {headers: {'content-type': request.headers['content-type']!}}).formData();
+      assert.equal(form.get('path'), 'index.html');
+      assert.equal(await (form.get('file') as File).text(), html);
+      uploads++;
+      response.statusCode = permanent ? 403 : uploads <= 2 ? 500 : 200;
+      response.end(JSON.stringify(response.statusCode === 200 ? {uploaded: ['index.html']} : {error: 'Simulated upload failure'}));
+    } else if (request.url?.endsWith('/finalize')) {
+      published++;
+      assert.equal(JSON.parse(Buffer.concat(bytes).toString()).publish, true);
+      response.end(JSON.stringify({published: true}));
+    } else { response.statusCode = 404; response.end('{}'); }
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address(); assert(address && typeof address !== 'string');
+  try {
+    await mkdir(join(root, 'dist'));
+    await writeFile(join(root, 'dist/index.html'), html);
+    const result = await command(root, ['deploy', 'dist', '--game', 'retry-game', '--publish'], `http://127.0.0.1:${address.port}`);
+    assert.match(result.stdout, /retrying the same data/);
+    assert.equal(created, 1); assert.equal(uploads, 3); assert.equal(published, 1);
+    permanent = true;
+    await assert.rejects(command(root, ['deploy', 'dist', '--game', 'retry-game', '--publish'], `http://127.0.0.1:${address.port}`), /Simulated upload failure/);
+    assert.equal(created, 2); assert.equal(uploads, 4); assert.equal(published, 1);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(root, {recursive: true, force: true});
+  }
+});
+
 function command(root: string, args: string[], apiUrl?: string, entry = cli, environment: NodeJS.ProcessEnv = {}) {
   return execute(process.execPath, ['--import', loader, entry, ...args], {
     cwd: root,
