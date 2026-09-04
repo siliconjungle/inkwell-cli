@@ -27,10 +27,15 @@ and that single deployment run.
 
 ## Deploy a game
 
-Your build directory must contain `index.html` at its root. Inkwell ignores development output such as `.git`, `.next`, and `node_modules` and rejects uncompressed builds over 100 MB.
+Builds may contain up to 1 GiB of files and 2,000 files. The default entrypoint is `index.html`; configure a different HTML entrypoint when needed. Inkwell ignores development directories such as `.git`, `.next`, and `node_modules`. Large files upload in resumable chunks; repeating the same command resumes verified chunks. Files keep their original names. Precompressed gzip/Brotli files retain the correct content type and encoding; Unity `.unityweb` fallback files are left for its loader to decompress.
 
 ```bash
-inkwell deploy ./dist --game my-game
+inkwell init --game my-game --directory dist --engine web
+inkwell deploy
+# Test the printed private preview, then select this build for the live URL:
+inkwell publish <build-id>
+# Or upload and publish in one explicit operation:
+inkwell deploy --publish
 ```
 
 For automatic deployment from a selected branch:
@@ -56,13 +61,32 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: npx @silicon-jungle/inkwell-cli deploy --game my-game
+      - run: npx @silicon-jungle/inkwell-cli deploy --game my-game --publish
 ```
 
 Set `branches` to the production branch selected on the game's Inkwell
 dashboard. A failed workflow leaves the currently published build live.
 
-This creates a per-file SHA-256 manifest, uploads bounded batches, and publishes the immutable build to its isolated Inkwell origin.
+This creates a per-file SHA-256 manifest, uploads bounded batches/chunks, and publishes only after complete verification. Without `--publish`, deployment uploads a draft. Publishing preserves the game’s private, unlisted, or public visibility. `inkwell publish` can select an older retained build to roll back.
+
+A draft uses the current creator backend. Backend code configured in the project is deployed by `deploy --publish`; a browser-only rollback does not roll back database state or backend code. Preview-scoped GitHub credentials cannot publish or replace a backend.
+
+## Project configuration
+
+```js
+export default {
+  game: "my-game",
+  client: {
+    directory: "exports/web",
+    entrypoint: "index.html",
+    engine: { name: "godot", version: "4.7.2" },
+    capabilities: { threads: false },
+    startup: { mode: "handshake", timeoutMs: 120000 },
+  },
+};
+```
+
+The CLI reads `inkwell.config.ts`, `.mjs`, or `.js` in the project root. Command-line directory and `--game` override the file. Engines are `web`, `godot`, `unity`, or `unreal`; the last requires an existing browser exporter. Inkwell preserves your HTML shell. Engine configs default to a readiness handshake; legacy configs without an engine default to `compatible`. New `init` configs use the handshake. Report startup through `Inkwell.loading.progress(ratio)`, `Inkwell.ready()`, and `Inkwell.loading.fail(message)` using the SDK or engine wrapper. Configure `threads: true` only for builds that need cross-origin isolation.
 
 ## Server secrets
 

@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { createReadStream, realpathSync } from "node:fs";
+import { uploadLargeFile } from "./chunk-upload.js";
+import { validateGameConfig, type InkwellGameConfig as GameConfig } from "./game-config.js";
 import { homedir } from "node:os";
 import { basename, join, relative, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { access, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -11,9 +14,9 @@ import { parse as parseDotenv } from "dotenv";
 import { build as esbuild } from "esbuild";
 
 const DEFAULT_API_URL = "https://inkwell.ing";
-const MAX_BUILD_BYTES = 100 * 1024 * 1024;
+const MAX_BUILD_BYTES = 1024 * 1024 * 1024;
 const MAX_BUILD_FILES = 2_000;
-const MAX_BUILD_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_BUILD_FILE_BYTES = MAX_BUILD_BYTES;
 const MAX_BATCH_BYTES = 20 * 1024 * 1024;
 const MAX_BATCH_FILES = 20;
 const IGNORED_DIRECTORIES = new Set([".git", ".next", ".vinext", "node_modules"]);
@@ -44,17 +47,8 @@ type BuildFile = {
   size: number;
 };
 
-type ManifestEntry = { path: string; size: number; sha256: string; contentType: string };
+type ManifestEntry = { path: string; size: number; sha256: string; contentType: string; contentEncoding?: "br" | "gzip" };
 
-type GameConfig = {
-  client: { directory: string };
-  backend?: {
-    entry: string;
-    region?: string;
-    maxConnections?: number;
-    resources?: { memoryMb?: number; sharedCpus?: number };
-  };
-};
 
 function configPath() {
   const root = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
@@ -83,7 +77,7 @@ function valueAfter(args: string[], flag: string) {
 function firstPositional(args: string[]) {
   for (let index = 0; index < args.length; index += 1) {
     if (args[index]?.startsWith("-")) {
-      index += 1;
+      if (!["--publish", "--threads"].includes(args[index]!)) index += 1;
       continue;
     }
     return args[index];
@@ -128,12 +122,19 @@ async function collectBuildFiles(root: string, current = root): Promise<BuildFil
   return files;
 }
 
+export function assetMetadata(path: string) {
+  const encoding = path.endsWith(".br") ? "br" : path.endsWith(".gz") ? "gzip" : undefined;
+  const originalPath = encoding ? path.slice(0, -3) : path;
+  return { contentType: contentType(originalPath), ...(encoding ? { contentEncoding: encoding as "br" | "gzip" } : {}) };
+}
+
 function contentType(path: string) {
   const extension = path.split(".").pop()?.toLowerCase();
   return (
     (
       {
         html: "text/html; charset=utf-8",
+        htm: "text/html; charset=utf-8",
         js: "text/javascript; charset=utf-8",
         mjs: "text/javascript; charset=utf-8",
         css: "text/css; charset=utf-8",
@@ -156,33 +157,34 @@ function contentType(path: string) {
   );
 }
 
-export async function packageBuild(directory: string) {
+export async function packageBuild(directory: string, entrypoint = "index.html") {
   const root = resolve(directory);
   const info = await stat(root).catch(() => null);
   if (!info?.isDirectory()) throw new Error(`Build directory not found: ${directory}`);
 
   const files = await collectBuildFiles(root);
-  if (!files.some((file) => file.archivePath === "index.html")) {
-    throw new Error("The build root must contain index.html.");
+  if (!files.some((file) => file.archivePath === entrypoint)) {
+    throw new Error(`The build must contain its HTML entrypoint: ${entrypoint}.`);
   }
 
   const totalBytes = files.reduce((total, file) => total + file.size, 0);
   if (totalBytes > MAX_BUILD_BYTES) {
-    throw new Error("The uncompressed build is over the 100 MB MVP limit.");
+    throw new Error("The build is over the 1 GiB limit.");
   }
   if (files.length > MAX_BUILD_FILES)
     throw new Error(`The build has more than ${MAX_BUILD_FILES} files.`);
   if (files.some((file) => file.size > MAX_BUILD_FILE_BYTES))
-    throw new Error("A build file is over the 20 MB per-file limit.");
+    throw new Error("A build file is over the 1 GiB per-file limit.");
 
   const manifest: ManifestEntry[] = [];
   for (const file of files) {
-    const bytes = await readFile(file.absolutePath);
+    const hash = createHash("sha256");
+    for await (const chunk of createReadStream(file.absolutePath)) hash.update(chunk);
     manifest.push({
       path: file.archivePath,
       size: file.size,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
-      contentType: contentType(file.archivePath),
+      sha256: hash.digest("hex"),
+      ...assetMetadata(file.archivePath),
     });
   }
   return { files, manifest, totalBytes };
@@ -208,55 +210,6 @@ function safeConfigPath(value: unknown, label: string) {
     throw new Error(`${label} must be a safe relative path.`);
   }
   return value;
-}
-
-function validateGameConfig(value: unknown): GameConfig {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Inkwell config must export an object.");
-  }
-  const config = value as Record<string, unknown>;
-  const client = config.client as Record<string, unknown> | undefined;
-  if (!client || typeof client !== "object" || Array.isArray(client)) {
-    throw new Error("Inkwell config requires client.directory.");
-  }
-  const result: GameConfig = {
-    client: { directory: safeConfigPath(client.directory, "client.directory") },
-  };
-  if (config.backend === undefined) return result;
-  if (!config.backend || typeof config.backend !== "object" || Array.isArray(config.backend)) {
-    throw new Error("backend must be an object.");
-  }
-  const backend = config.backend as Record<string, unknown>;
-  const resources = backend.resources as Record<string, unknown> | undefined;
-  const maxConnections = backend.maxConnections ?? 100;
-  if (
-    !Number.isInteger(maxConnections) ||
-    (maxConnections as number) < 1 ||
-    (maxConnections as number) > 10_000
-  ) {
-    throw new Error("backend.maxConnections must be an integer from 1 to 10,000.");
-  }
-  const memoryMb = resources?.memoryMb ?? 256;
-  const sharedCpus = resources?.sharedCpus ?? 1;
-  if (![256, 512, 1024, 2048].includes(memoryMb as number)) {
-    throw new Error("backend.resources.memoryMb is unsupported.");
-  }
-  if (![1, 2, 4].includes(sharedCpus as number)) {
-    throw new Error("backend.resources.sharedCpus is unsupported.");
-  }
-  if (
-    backend.region !== undefined &&
-    (typeof backend.region !== "string" || !/^[a-z][a-z0-9-]{1,15}$/.test(backend.region))
-  ) {
-    throw new Error("backend.region is invalid.");
-  }
-  result.backend = {
-    entry: safeConfigPath(backend.entry, "backend.entry"),
-    maxConnections: maxConnections as number,
-    ...(typeof backend.region === "string" ? { region: backend.region } : {}),
-    resources: { memoryMb: memoryMb as number, sharedCpus: sharedCpus as number },
-  };
-  return result;
 }
 
 export async function loadGameConfig(root = process.cwd()) {
@@ -310,6 +263,7 @@ async function apiRequest(
   path: string,
   init: RequestInit = {},
   credentials: { token?: string; apiUrl?: string } = {},
+  attempt = 0,
 ) {
   const config = await readConfig();
   const token = credentials.token || process.env.INKWELL_TOKEN || config.token;
@@ -337,6 +291,12 @@ async function apiRequest(
           ? body.message
           : `Request failed (${response.status})`;
     const retryAfter = response.headers.get("retry-after");
+    if (response.status === 429 && attempt < 4) {
+      const delay = Math.min(60, Math.max(1, Number(retryAfter) || 60));
+      console.log(`Upload rate limit reached; resuming in ${delay} seconds…`);
+      await new Promise(resolve => setTimeout(resolve, delay * 1000));
+      return apiRequest(path, init, credentials, attempt + 1);
+    }
     throw new Error(
       response.status === 429 && retryAfter
         ? `${message} Retry after ${retryAfter} seconds.`
@@ -626,10 +586,10 @@ async function secretsCommand(args: string[]) {
 async function deploy(args: string[]) {
   const project = await loadGameConfig();
   const directory = firstPositional(args) || project?.config.client.directory || ".";
-  const game = requireGame(args);
+  const game = valueAfter(args, "--game") || valueAfter(args, "-g") || project?.config.game || requireGame(args);
 
   process.stdout.write(`Packaging ${basename(resolve(directory))}... `);
-  const build = await packageBuild(directory);
+  const build = await packageBuild(directory, project?.config.client.entrypoint);
   console.log(`${build.files.length} files, ${(build.totalBytes / 1024 / 1024).toFixed(1)} MB`);
 
   const configured = await readConfig();
@@ -645,7 +605,7 @@ async function deploy(args: string[]) {
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ manifest: build.manifest }),
+        body: JSON.stringify({ manifest: build.manifest, client: project?.config.client }),
       },
       credentials,
     );
@@ -658,6 +618,10 @@ async function deploy(args: string[]) {
       let batch: BuildFile[] = [];
       let batchBytes = 0;
       for (const file of build.files) {
+        if (file.size > MAX_BATCH_BYTES) {
+          await uploadLargeFile(buildRecord.publicId, file, (path, init) => apiRequest(path, init, credentials), (done, total) => process.stdout.write(`Uploading ${file.archivePath}: ${done}/${total} chunks…\r`));
+          continue;
+        }
         if (
           batch.length &&
           (batch.length >= MAX_BATCH_FILES || batchBytes + file.size > MAX_BATCH_BYTES)
@@ -686,14 +650,14 @@ async function deploy(args: string[]) {
         }
         await apiRequest(
           `/api/v1/builds/${buildRecord.publicId}/files`,
-          { method: "POST", body: form },
+          { method: "PUT", body: form },
           credentials,
         );
       }
       output.write("\n");
     }
 
-    if (project?.config.backend && actionsCredentials?.target !== "preview") {
+    if (project?.config.backend && args.includes("--publish") && actionsCredentials?.target !== "preview") {
       process.stdout.write("Bundling server code... ");
       const backend = await bundleBackend(project.root, project.config.backend.entry);
       console.log(`${(backend.bytes.byteLength / 1024).toFixed(1)} KiB`);
@@ -720,7 +684,7 @@ async function deploy(args: string[]) {
           : "Server deployment active.",
       );
     }
-    if (project?.config.backend && actionsCredentials?.target === "preview") {
+    if (project?.config.backend && (!args.includes("--publish") || actionsCredentials?.target === "preview")) {
       console.log("Preview uses the current production server; server code was not replaced.");
     }
 
@@ -728,7 +692,7 @@ async function deploy(args: string[]) {
     // first so a failed server build cannot publish a client that depends on it.
     const result = await apiRequest(
       `/api/v1/builds/${buildRecord.publicId}/finalize`,
-      { method: "POST" },
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: args.includes("--publish") }) },
       credentials,
     );
     console.log(
@@ -736,6 +700,8 @@ async function deploy(args: string[]) {
         ? `${actionsCredentials.target === "production" ? "Production" : "Preview"} deployment complete.`
         : "Deployment complete.",
     );
+    console.log(args.includes("--publish") ? "Build published." : "Draft uploaded. Preview it, then run inkwell publish <build-id> to make it live.");
+    console.log(`Build: ${buildRecord.publicId}`);
     if (typeof result.pageUrl === "string") console.log(result.pageUrl);
     if (actionsCredentials) {
       await finishGithubActionsDeployment(actionsCredentials, "succeeded");
@@ -759,7 +725,9 @@ Usage:
   inkwell login [token]
   inkwell logout
   inkwell whoami
-  inkwell deploy [directory] --game <slug>
+  inkwell init --game <slug> [--directory dist] [--engine godot|unity|web|unreal]
+  inkwell deploy [directory] [--game <slug>] [--publish]
+  inkwell publish <build-id>
   inkwell secrets list --game <slug>
   inkwell secrets set NAME --game <slug>
   inkwell secrets import [.env] --game <slug>
@@ -786,6 +754,24 @@ async function main() {
     case "whoami":
       await whoami();
       break;
+    case "init": {
+      const directory = valueAfter(args, '--directory') || 'dist';
+      const name = valueAfter(args, '--engine');
+      const version = valueAfter(args, '--engine-version');
+      const config = validateGameConfig({game: requireGame(args), client: {directory, entrypoint: valueAfter(args, '--entrypoint') || 'index.html', ...(name ? {engine: {name, ...(version ? {version} : {})}} : {}), capabilities: {threads: args.includes('--threads')}, startup: {mode: 'handshake', timeoutMs: 120000}}});
+      if (await findConfig()) throw new Error('This project already has an Inkwell config. Edit it to change export settings.');
+      await writeFile(join(process.cwd(), 'inkwell.config.js'), `export default ${JSON.stringify(config, null, 2)};\n`, {flag: 'wx'});
+      console.log('Created inkwell.config.js. Call Inkwell.ready() when the game is playable.');
+      break;
+    }
+    case "publish": {
+      const buildId = firstPositional(args);
+      if (!buildId || !/^[a-z0-9]{10,32}$/.test(buildId)) throw new Error('Provide the build ID printed by inkwell deploy.');
+      const result = await apiRequest(`/api/v1/builds/${buildId}/publish`, {method: 'POST'});
+      console.log('Build published.');
+      if (typeof result.pageUrl === 'string') console.log(result.pageUrl);
+      break;
+    }
     case "deploy":
       await deploy(args);
       break;
@@ -803,7 +789,18 @@ async function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+export function isMainModule(moduleUrl: string, executablePath = process.argv[1]) {
+  if (!executablePath) return false;
+  try {
+    // npm and npx launch package binaries through a symlink in node_modules/.bin.
+    // Compare canonical filesystem paths so the CLI still starts in that normal case.
+    return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(executablePath);
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule(import.meta.url)) {
   main().catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`Error: ${message}`);
