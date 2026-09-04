@@ -130,11 +130,11 @@ void test("keeps multipart batches within the conservative memory budget", () =>
   const batches = createUploadBatches(files);
   assert.deepEqual(
     batches.map((batch) => batch.map((file) => file.archivePath)),
-    [["textures/large.png", "textures/one.png"], ["textures/two.png"]],
+    [["textures/large.png"], ["textures/one.png", "textures/two.png"]],
   );
   assert.ok(
     batches.every(
-      (batch) => batch.reduce((total, file) => total + file.size, 0) <= 24 * MEBIBYTE,
+      (batch) => batch.reduce((total, file) => total + file.size, 0) <= 20 * MEBIBYTE,
     ),
   );
 });
@@ -148,7 +148,7 @@ void test("multipart upload uses PUT to bypass progressive Server Action interce
   assert.equal(request.body, form);
 });
 
-void test("uses raw uploads for large individual files", () => {
+void test("separates large files for resumable chunk uploads", () => {
   const large = {
     absolutePath: "/large",
     archivePath: "models/nibs.glb",
@@ -180,14 +180,15 @@ void test("rejects a build above 1 GiB before reading sparse asset files", async
   }
 });
 
-void test("rejects an individual file above 32 MiB", async () => {
+void test("accepts engine files above the old 32 MiB limit", async () => {
   const directory = await mkdtemp(join(tmpdir(), "inkwell-file-limit-test-"));
   try {
     await writeFile(join(directory, "index.html"), "x");
     const path = join(directory, "oversized.bin");
     await writeFile(path, "");
     await truncate(path, 32 * MEBIBYTE + 1);
-    await assert.rejects(packageBuild(directory), /32 MiB per-file limit/);
+    const build = await packageBuild(directory);
+    assert.equal(build.manifest.find((file) => file.path === 'oversized.bin')?.size, 32 * MEBIBYTE + 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
