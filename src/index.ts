@@ -15,7 +15,7 @@ const DEFAULT_API_URL = "https://inkwell.ing";
 const MAX_BUILD_BYTES = 1024 * 1024 * 1024;
 const MAX_BUILD_FILES = 2_000;
 const MAX_BUILD_FILE_BYTES = 32 * 1024 * 1024;
-const MAX_BATCH_BYTES = 32 * 1024 * 1024;
+const MAX_MULTIPART_BATCH_BYTES = 24 * 1024 * 1024;
 const MAX_BATCH_FILES = 20;
 const IGNORED_DIRECTORIES = new Set([".git", ".next", ".vinext", "node_modules"]);
 const SENSITIVE_BUILD_FILES = new Set([".dev.vars", ".npmrc"]);
@@ -197,7 +197,7 @@ export function createUploadBatches(files: BuildFile[]) {
     if (
       batch.length &&
       (batch.length >= MAX_BATCH_FILES ||
-        batchBytes + file.size > MAX_BATCH_BYTES)
+        batchBytes + file.size > MAX_MULTIPART_BATCH_BYTES)
     ) {
       batches.push(batch);
       batch = [];
@@ -208,6 +208,16 @@ export function createUploadBatches(files: BuildFile[]) {
   }
   if (batch.length) batches.push(batch);
   return batches;
+}
+
+export function createUploadPlan(files: BuildFile[]) {
+  const directFiles = files.filter(
+    (file) => file.size > MAX_MULTIPART_BATCH_BYTES,
+  );
+  const batches = createUploadBatches(
+    files.filter((file) => file.size <= MAX_MULTIPART_BATCH_BYTES),
+  );
+  return { batches, directFiles };
 }
 
 async function findConfig(root = process.cwd()) {
@@ -678,10 +688,12 @@ async function deploy(args: string[]) {
       throw new Error("Inkwell did not return a build ID.");
     }
     if (!created.alreadyUploaded) {
-      const batches = createUploadBatches(build.files);
+      const { batches, directFiles } = createUploadPlan(build.files);
+      const uploadCount = batches.length + directFiles.length;
+      let uploaded = 0;
 
       for (let index = 0; index < batches.length; index += 1) {
-        process.stdout.write(`Uploading ${index + 1}/${batches.length}...\r`);
+        process.stdout.write(`Uploading ${uploaded + 1}/${uploadCount}...\r`);
         const form = new FormData();
         for (const file of batches[index]!) {
           form.append("path", file.archivePath);
@@ -698,6 +710,22 @@ async function deploy(args: string[]) {
           { method: "POST", body: form },
           credentials,
         );
+        uploaded += 1;
+      }
+      for (const file of directFiles) {
+        process.stdout.write(`Uploading ${uploaded + 1}/${uploadCount}...\r`);
+        await apiRequest(
+          `/api/v1/builds/${buildRecord.publicId}/files?path=${encodeURIComponent(file.archivePath)}`,
+          {
+            method: "PUT",
+            headers: { "content-type": contentType(file.archivePath) },
+            body: new Blob([await readFile(file.absolutePath)], {
+              type: contentType(file.archivePath),
+            }),
+          },
+          credentials,
+        );
+        uploaded += 1;
       }
       output.write("\n");
     }

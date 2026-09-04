@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import {
   bundleBackend,
   createUploadBatches,
+  createUploadPlan,
   isMainModule,
   loadGameConfig,
   packageBuild,
@@ -119,22 +120,39 @@ void test("refuses to package dotenv files anywhere in a browser build", async (
   }
 });
 
-void test("accepts Pathweaver-sized files and keeps upload batches within 32 MiB", () => {
+void test("keeps multipart batches below their parser ceiling", () => {
   const files = [
-    { absolutePath: "/a", archivePath: "models/nibs.glb", size: 27_197_228 },
+    { absolutePath: "/a", archivePath: "textures/large.png", size: 20 * MEBIBYTE },
     { absolutePath: "/b", archivePath: "textures/one.png", size: 3_700_000 },
     { absolutePath: "/c", archivePath: "textures/two.png", size: 3_600_000 },
   ];
   const batches = createUploadBatches(files);
   assert.deepEqual(
     batches.map((batch) => batch.map((file) => file.archivePath)),
-    [["models/nibs.glb", "textures/one.png"], ["textures/two.png"]],
+    [["textures/large.png", "textures/one.png"], ["textures/two.png"]],
   );
   assert.ok(
     batches.every(
-      (batch) => batch.reduce((total, file) => total + file.size, 0) <= 32 * MEBIBYTE,
+      (batch) => batch.reduce((total, file) => total + file.size, 0) <= 24 * MEBIBYTE,
     ),
   );
+});
+
+void test("uses raw uploads for large individual files", () => {
+  const large = {
+    absolutePath: "/large",
+    archivePath: "models/nibs.glb",
+    size: 27_197_228,
+  };
+  const small = {
+    absolutePath: "/small",
+    archivePath: "textures/one.png",
+    size: 3_700_000,
+  };
+  assert.deepEqual(createUploadPlan([large, small]), {
+    batches: [[small]],
+    directFiles: [large],
+  });
 });
 
 void test("rejects a build above 1 GiB before reading sparse asset files", async () => {
