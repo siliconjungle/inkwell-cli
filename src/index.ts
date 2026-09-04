@@ -17,7 +17,7 @@ const DEFAULT_API_URL = "https://inkwell.ing";
 const MAX_BUILD_BYTES = 1024 * 1024 * 1024;
 const MAX_BUILD_FILES = 2_000;
 const MAX_BUILD_FILE_BYTES = MAX_BUILD_BYTES;
-const MAX_BATCH_BYTES = 20 * 1024 * 1024;
+const MAX_MULTIPART_BATCH_BYTES = 20 * 1024 * 1024;
 const MAX_BATCH_FILES = 20;
 const IGNORED_DIRECTORIES = new Set([".git", ".next", ".vinext", "node_modules"]);
 const SENSITIVE_BUILD_FILES = new Set([".dev.vars", ".npmrc"]);
@@ -190,6 +190,43 @@ export async function packageBuild(directory: string, entrypoint = "index.html")
   return { files, manifest, totalBytes };
 }
 
+export function createUploadBatches(files: BuildFile[]) {
+  const batches: BuildFile[][] = [];
+  let batch: BuildFile[] = [];
+  let batchBytes = 0;
+  for (const file of files) {
+    if (
+      batch.length &&
+      (batch.length >= MAX_BATCH_FILES ||
+        batchBytes + file.size > MAX_MULTIPART_BATCH_BYTES)
+    ) {
+      batches.push(batch);
+      batch = [];
+      batchBytes = 0;
+    }
+    batch.push(file);
+    batchBytes += file.size;
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
+
+export function createUploadPlan(files: BuildFile[]) {
+  const directFiles = files.filter(
+    (file) => file.size > MAX_MULTIPART_BATCH_BYTES,
+  );
+  const batches = createUploadBatches(
+    files.filter((file) => file.size <= MAX_MULTIPART_BATCH_BYTES),
+  );
+  return { batches, directFiles };
+}
+
+export function multipartUploadRequest(form: FormData): RequestInit {
+  // POST multipart bodies are intercepted by progressive Server Actions before
+  // API routing in vinext. PUT reaches the authenticated build upload handler.
+  return { method: "PUT", body: form };
+}
+
 async function findConfig(root = process.cwd()) {
   for (const name of CONFIG_FILES) {
     const path = join(root, name);
@@ -315,8 +352,10 @@ export async function requestGithubActionsCredentials(
     fetcher?: typeof fetch;
   } = {},
 ): Promise<GithubActionsCredentials | null> {
-  const requestUrl = options.requestUrl || process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
-  const requestToken = options.requestToken || process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+  const requestUrl =
+    options.requestUrl ?? process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+  const requestToken =
+    options.requestToken ?? process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
   if (!requestUrl || !requestToken) return null;
   const fetcher = options.fetcher || fetch;
   const apiUrl = options.apiUrl || process.env.INKWELL_API_URL || DEFAULT_API_URL;
@@ -598,6 +637,7 @@ async function deploy(args: string[]) {
     ? null
     : await requestGithubActionsCredentials(game);
   const credentials = actionsCredentials || {};
+  const shouldPublish = args.includes("--publish") && actionsCredentials?.target !== "preview";
 
   try {
     const created = await apiRequest(
@@ -614,29 +654,12 @@ async function deploy(args: string[]) {
       throw new Error("Inkwell did not return a build ID.");
     }
     if (!created.alreadyUploaded) {
-      const batches: BuildFile[][] = [];
-      let batch: BuildFile[] = [];
-      let batchBytes = 0;
-      for (const file of build.files) {
-        if (file.size > MAX_BATCH_BYTES) {
-          await uploadLargeFile(buildRecord.publicId, file, (path, init) => apiRequest(path, init, credentials), (done, total) => process.stdout.write(`Uploading ${file.archivePath}: ${done}/${total} chunks…\r`));
-          continue;
-        }
-        if (
-          batch.length &&
-          (batch.length >= MAX_BATCH_FILES || batchBytes + file.size > MAX_BATCH_BYTES)
-        ) {
-          batches.push(batch);
-          batch = [];
-          batchBytes = 0;
-        }
-        batch.push(file);
-        batchBytes += file.size;
-      }
-      if (batch.length) batches.push(batch);
+      const { batches, directFiles } = createUploadPlan(build.files);
+      const uploadCount = batches.length + directFiles.length;
+      let uploaded = 0;
 
       for (let index = 0; index < batches.length; index += 1) {
-        process.stdout.write(`Uploading ${index + 1}/${batches.length}...\r`);
+        process.stdout.write(`Uploading ${uploaded + 1}/${uploadCount}...\r`);
         const form = new FormData();
         for (const file of batches[index]!) {
           form.append("path", file.archivePath);
@@ -650,14 +673,25 @@ async function deploy(args: string[]) {
         }
         await apiRequest(
           `/api/v1/builds/${buildRecord.publicId}/files`,
-          { method: "PUT", body: form },
+          multipartUploadRequest(form),
           credentials,
         );
+        uploaded += 1;
+      }
+      for (const file of directFiles) {
+        process.stdout.write(`Uploading ${uploaded + 1}/${uploadCount}...\r`);
+        await uploadLargeFile(
+          buildRecord.publicId,
+          file,
+          (path, init) => apiRequest(path, init, credentials),
+          (done, total) => process.stdout.write(`Uploading ${file.archivePath}: ${done}/${total} chunks…\r`),
+        );
+        uploaded += 1;
       }
       output.write("\n");
     }
 
-    if (project?.config.backend && args.includes("--publish") && actionsCredentials?.target !== "preview") {
+    if (project?.config.backend && shouldPublish) {
       process.stdout.write("Bundling server code... ");
       const backend = await bundleBackend(project.root, project.config.backend.entry);
       console.log(`${(backend.bytes.byteLength / 1024).toFixed(1)} KiB`);
@@ -684,7 +718,7 @@ async function deploy(args: string[]) {
           : "Server deployment active.",
       );
     }
-    if (project?.config.backend && (!args.includes("--publish") || actionsCredentials?.target === "preview")) {
+    if (project?.config.backend && !shouldPublish) {
       console.log("Preview uses the current production server; server code was not replaced.");
     }
 
@@ -692,7 +726,7 @@ async function deploy(args: string[]) {
     // first so a failed server build cannot publish a client that depends on it.
     const result = await apiRequest(
       `/api/v1/builds/${buildRecord.publicId}/finalize`,
-      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: args.includes("--publish") }) },
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: shouldPublish }) },
       credentials,
     );
     console.log(
@@ -700,7 +734,7 @@ async function deploy(args: string[]) {
         ? `${actionsCredentials.target === "production" ? "Production" : "Preview"} deployment complete.`
         : "Deployment complete.",
     );
-    console.log(args.includes("--publish") ? "Build published." : "Draft uploaded. Preview it, then run inkwell publish <build-id> to make it live.");
+    console.log(shouldPublish ? "Build published." : "Draft uploaded. Preview it, then run inkwell publish <build-id> to make it live.");
     console.log(`Build: ${buildRecord.publicId}`);
     if (typeof result.pageUrl === "string") console.log(result.pageUrl);
     if (actionsCredentials) {

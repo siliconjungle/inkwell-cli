@@ -1,17 +1,44 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   bundleBackend,
+  createUploadBatches,
+  createUploadPlan,
+  multipartUploadRequest,
+  isMainModule,
   loadGameConfig,
   packageBuild,
   requestGithubActionsCredentials,
   validateSecretName,
   validateSecretValues,
 } from "./index.js";
+
+const MEBIBYTE = 1024 * 1024;
+
+void test("recognizes npm-style symlinked package binaries as the main module", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "inkwell-cli-entrypoint-test-"));
+  try {
+    const modulePath = join(directory, "dist", "index.js");
+    const executablePath = join(directory, "node_modules", ".bin", "inkwell");
+    await mkdir(join(directory, "dist"), { recursive: true });
+    await mkdir(join(directory, "node_modules", ".bin"), { recursive: true });
+    await writeFile(modulePath, "");
+    await symlink(modulePath, executablePath);
+
+    assert.equal(isMainModule(pathToFileURL(modulePath).href, executablePath), true);
+    assert.equal(
+      isMainModule(pathToFileURL(join(directory, "other.js")).href, executablePath),
+      false,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 void test("exchanges GitHub Actions OIDC for a short-lived game credential", async () => {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
@@ -89,6 +116,79 @@ void test("refuses to package dotenv files anywhere in a browser build", async (
     await mkdir(join(directory, "nested"));
     await writeFile(join(directory, "nested", ".env.production"), "SECRET=value");
     await assert.rejects(packageBuild(directory), /Refusing to package/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+void test("keeps multipart batches within the conservative memory budget", () => {
+  const files = [
+    { absolutePath: "/a", archivePath: "textures/large.png", size: 20 * MEBIBYTE },
+    { absolutePath: "/b", archivePath: "textures/one.png", size: 3_700_000 },
+    { absolutePath: "/c", archivePath: "textures/two.png", size: 3_600_000 },
+  ];
+  const batches = createUploadBatches(files);
+  assert.deepEqual(
+    batches.map((batch) => batch.map((file) => file.archivePath)),
+    [["textures/large.png"], ["textures/one.png", "textures/two.png"]],
+  );
+  assert.ok(
+    batches.every(
+      (batch) => batch.reduce((total, file) => total + file.size, 0) <= 20 * MEBIBYTE,
+    ),
+  );
+});
+
+void test("multipart upload uses PUT to bypass progressive Server Action interception", () => {
+  const form = new FormData();
+  form.append("path", "index.html");
+  form.append("file", new Blob(["game"]), "index.html");
+  const request = multipartUploadRequest(form);
+  assert.equal(request.method, "PUT");
+  assert.equal(request.body, form);
+});
+
+void test("separates large files for resumable chunk uploads", () => {
+  const large = {
+    absolutePath: "/large",
+    archivePath: "models/nibs.glb",
+    size: 27_197_228,
+  };
+  const small = {
+    absolutePath: "/small",
+    archivePath: "textures/one.png",
+    size: 3_700_000,
+  };
+  assert.deepEqual(createUploadPlan([large, small]), {
+    batches: [[small]],
+    directFiles: [large],
+  });
+});
+
+void test("rejects a build above 1 GiB before reading sparse asset files", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "inkwell-large-build-test-"));
+  try {
+    await writeFile(join(directory, "index.html"), "x");
+    for (let index = 0; index < 32; index += 1) {
+      const path = join(directory, `chunk-${index}.bin`);
+      await writeFile(path, "");
+      await truncate(path, 32 * MEBIBYTE);
+    }
+    await assert.rejects(packageBuild(directory), /over the 1 GiB limit/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+void test("accepts engine files above the old 32 MiB limit", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "inkwell-file-limit-test-"));
+  try {
+    await writeFile(join(directory, "index.html"), "x");
+    const path = join(directory, "oversized.bin");
+    await writeFile(path, "");
+    await truncate(path, 32 * MEBIBYTE + 1);
+    const build = await packageBuild(directory);
+    assert.equal(build.manifest.find((file) => file.path === 'oversized.bin')?.size, 32 * MEBIBYTE + 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
