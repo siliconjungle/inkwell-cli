@@ -9,6 +9,7 @@ import {
   bundleBackend,
   createUploadBatches,
   createUploadPlan,
+  multipartUploadRequest,
   isMainModule,
   loadGameConfig,
   packageBuild,
@@ -120,7 +121,7 @@ void test("refuses to package dotenv files anywhere in a browser build", async (
   }
 });
 
-void test("keeps multipart batches below their parser ceiling", () => {
+void test("keeps multipart batches within the conservative memory budget", () => {
   const files = [
     { absolutePath: "/a", archivePath: "textures/large.png", size: 20 * MEBIBYTE },
     { absolutePath: "/b", archivePath: "textures/one.png", size: 3_700_000 },
@@ -136,6 +137,15 @@ void test("keeps multipart batches below their parser ceiling", () => {
       (batch) => batch.reduce((total, file) => total + file.size, 0) <= 24 * MEBIBYTE,
     ),
   );
+});
+
+void test("multipart upload uses PUT to bypass progressive Server Action interception", () => {
+  const form = new FormData();
+  form.append("path", "index.html");
+  form.append("file", new Blob(["game"]), "index.html");
+  const request = multipartUploadRequest(form);
+  assert.equal(request.method, "PUT");
+  assert.equal(request.body, form);
 });
 
 void test("uses raw uploads for large individual files", () => {

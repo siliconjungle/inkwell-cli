@@ -220,6 +220,12 @@ export function createUploadPlan(files: BuildFile[]) {
   return { batches, directFiles };
 }
 
+export function multipartUploadRequest(form: FormData): RequestInit {
+  // POST multipart bodies are intercepted by progressive Server Actions before
+  // API routing in vinext. PUT reaches the authenticated build upload handler.
+  return { method: "PUT", body: form };
+}
+
 async function findConfig(root = process.cwd()) {
   for (const name of CONFIG_FILES) {
     const path = join(root, name);
@@ -707,7 +713,7 @@ async function deploy(args: string[]) {
         }
         await apiRequest(
           `/api/v1/builds/${buildRecord.publicId}/files`,
-          { method: "POST", body: form },
+          multipartUploadRequest(form),
           credentials,
         );
         uploaded += 1;
