@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream, realpathSync } from "node:fs";
 import { uploadLargeFile } from "./chunk-upload.js";
+import { fetchWithUploadRetry } from "./upload-request.js";
 import { validateGameConfig, type InkwellGameConfig as GameConfig } from "./game-config.js";
 import { homedir } from "node:os";
 import { basename, join, relative, resolve, sep } from "node:path";
@@ -310,13 +311,15 @@ async function apiRequest(
 
   const apiUrl =
     credentials.apiUrl || process.env.INKWELL_API_URL || config.apiUrl || DEFAULT_API_URL;
-  const response = await fetch(new URL(path, apiUrl), {
+  const response = await fetchWithUploadRetry(new URL(path, apiUrl), {
     ...init,
     headers: (() => {
       const headers = new Headers(init.headers);
       headers.set("authorization", `Bearer ${token}`);
       return headers;
     })(),
+  }, {
+    onRetry: (attempt, status) => console.log(`Upload interrupted${status ? ` (HTTP ${status})` : ''}; retrying the same data (${attempt}/3)…`),
   });
 
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;

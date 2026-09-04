@@ -29,6 +29,12 @@ and that single deployment run.
 
 Builds may contain up to 1 GiB of files and 2,000 files. The default entrypoint is `index.html`; configure a different HTML entrypoint when needed. Inkwell ignores development directories such as `.git`, `.next`, and `node_modules`. Large files upload in resumable chunks; repeating the same command resumes verified chunks. Files keep their original names. Precompressed gzip/Brotli files retain the correct content type and encoding; Unity `.unityweb` fallback files are left for its loader to decompress.
 
+Content-addressed PUT uploads retry network failures and HTTP 500/502/503/504
+up to three times with backoff. Each attempt has a two-minute timeout. The same
+bytes are retried; build creation, backend deployment and publication mutations
+are never automatically repeated for these errors. Permanent errors still stop
+deployment without replacing the live build.
+
 ```bash
 inkwell init --game my-game --directory dist --engine web
 inkwell deploy
