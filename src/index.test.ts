@@ -9,10 +9,13 @@ import {
   bundleBackend,
   createUploadBatches,
   createUploadPlan,
+  docsPath,
+  gameMetadataFromArgs,
   multipartUploadRequest,
   isMainModule,
   loadGameConfig,
   packageBuild,
+  pageImageContentType,
   requestGithubActionsCredentials,
   validateSecretName,
   validateSecretValues,
@@ -89,6 +92,60 @@ void test("does not attempt OIDC outside GitHub Actions", async () => {
   );
 });
 
+void test("builds stable token-efficient documentation paths", () => {
+  assert.equal(docsPath(), "/docs.md");
+  assert.equal(docsPath("first-game"), "/docs/first-game.md");
+  assert.throws(() => docsPath("../../keys"), /lowercase/);
+});
+
+void test("builds creator game metadata from CLI flags", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "inkwell-cli-metadata-test-"));
+  try {
+    const description = join(directory, "game.md");
+    await writeFile(description, "# A little dungeon\n");
+    assert.deepEqual(
+      await gameMetadataFromArgs(
+        [
+          "--title",
+          "  Ink Descent  ",
+          "--summary",
+          " Descend together. ",
+          "--tags",
+          "Action, Multiplayer,Action",
+          "--description-file",
+          description,
+          "--visibility",
+          "unlisted",
+        ],
+        true,
+      ),
+      {
+        title: "Ink Descent",
+        description: "Descend together.",
+        genreTags: ["Action", "Multiplayer"],
+        longDescriptionMarkdown: "# A little dungeon",
+        visibility: "unlisted",
+      },
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+void test("rejects incomplete creation metadata and premature public visibility", async () => {
+  await assert.rejects(gameMetadataFromArgs([], true), /--title/);
+  await assert.rejects(
+    gameMetadataFromArgs(["--title", "Game", "--visibility", "public"], true),
+    /publish a build/,
+  );
+});
+
+void test("accepts only supported page image extensions", () => {
+  assert.equal(pageImageContentType("cover.png"), "image/png");
+  assert.equal(pageImageContentType("cover.webp"), "image/webp");
+  assert.throws(() => pageImageContentType("cover.svg"), /JPEG, PNG, WebP, or GIF/);
+});
+
 void test("validates server secret names and values before sending them", () => {
   assert.equal(validateSecretName("STRIPE_API_KEY"), "STRIPE_API_KEY");
   assert.deepEqual(validateSecretValues({ TOKEN: "opaque=value" }), {
@@ -133,9 +190,7 @@ void test("keeps multipart batches within the conservative memory budget", () =>
     [["textures/large.png"], ["textures/one.png", "textures/two.png"]],
   );
   assert.ok(
-    batches.every(
-      (batch) => batch.reduce((total, file) => total + file.size, 0) <= 20 * MEBIBYTE,
-    ),
+    batches.every((batch) => batch.reduce((total, file) => total + file.size, 0) <= 20 * MEBIBYTE),
   );
 });
 
@@ -188,7 +243,10 @@ void test("accepts engine files above the old 32 MiB limit", async () => {
     await writeFile(path, "");
     await truncate(path, 32 * MEBIBYTE + 1);
     const build = await packageBuild(directory);
-    assert.equal(build.manifest.find((file) => file.path === 'oversized.bin')?.size, 32 * MEBIBYTE + 1);
+    assert.equal(
+      build.manifest.find((file) => file.path === "oversized.bin")?.size,
+      32 * MEBIBYTE + 1,
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

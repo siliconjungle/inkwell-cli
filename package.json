@@ -1,9 +1,16 @@
 {
   "name": "@silicon-jungle/inkwell-cli",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "Deploy browser games to Inkwell from the command line.",
+  "homepage": "https://inkwell.ing",
+  "bugs": {
+    "url": "https://github.com/siliconjungle/inkwell-cli/issues"
+  },
   "license": "MIT",
-  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/siliconjungle/inkwell-cli.git"
+  },
   "bin": {
     "inkwell": "dist/index.js"
   },
@@ -12,8 +19,9 @@
     "README.md",
     "LICENSE"
   ],
-  "engines": {
-    "node": ">=22.13.0"
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -21,24 +29,16 @@
     "test": "tsx --test src/*.test.ts && node --test scripts/*.test.mjs",
     "dev": "node --import=tsx src/index.ts"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/siliconjungle/inkwell-cli.git"
-  },
-  "bugs": {
-    "url": "https://github.com/siliconjungle/inkwell-cli/issues"
-  },
-  "homepage": "https://inkwell.ing",
-  "publishConfig": {
-    "access": "public"
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "esbuild": "^0.28.2"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   },
-  "dependencies": {
-    "dotenv": "^17.4.2",
-    "esbuild": "^0.28.2"
+  "engines": {
+    "node": ">=22.13.0"
   }
 }
