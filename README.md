@@ -25,6 +25,20 @@ connected to the game. Grant the workflow `id-token: write`; the CLI exchanges
 GitHub's signed job identity for a short-lived credential scoped to that game
 and that single deployment run.
 
+## Agent-friendly documentation
+
+Fetch concise Markdown without page chrome. No sign-in is required, and topic
+files keep context use bounded for coding agents.
+
+```bash
+inkwell docs
+inkwell docs first-game
+inkwell docs api --output INKWELL_API.md
+```
+
+The same files are available at `https://inkwell.ing/docs.md` and
+`https://inkwell.ing/docs/<topic>.md`. The index lists current topics.
+
 ## Deploy a game
 
 Builds may contain up to 1 GiB of files and 2,000 files. The default entrypoint is `index.html`; configure a different HTML entrypoint when needed. Inkwell ignores development directories such as `.git`, `.next`, and `node_modules`. Large files upload in resumable chunks; repeating the same command resumes verified chunks. Files keep their original names. Precompressed gzip/Brotli files retain the correct content type and encoding; Unity `.unityweb` fallback files are left for its loader to decompress.
@@ -34,6 +48,46 @@ up to three times with backoff. Each attempt has a two-minute timeout. The same
 bytes are retried; build creation, backend deployment and publication mutations
 are never automatically repeated for these errors. Permanent errors still stop
 deployment without replacing the live build.
+
+### Complete first publication from the CLI
+
+The CLI can create the game page, upload its page images, upload the browser
+build, publish it, and change its visibility. No dashboard step is required.
+
+```bash
+inkwell login
+inkwell games create \
+  --game my-game \
+  --title "My Game" \
+  --summary "A short public summary." \
+  --description-file GAME_PAGE.md \
+  --tags action,multiplayer \
+  --visibility unlisted \
+  --cover cover.png \
+  --screenshot screenshot-1.png
+
+inkwell init --game my-game --directory dist --engine web
+npm run build
+inkwell deploy --publish
+
+# Optional: list it publicly after testing the unlisted URL.
+inkwell games update --game my-game --visibility public
+```
+
+Creation accepts `private` or `unlisted` visibility because a public game must
+have a published build. `games update` can later set `private`, `unlisted`, or
+`public`. The slug is permanent. Page images must be JPEG, PNG, WebP, or GIF and
+at most 5 MB each. Repeat `--screenshot` to add several screenshots.
+
+Useful management commands:
+
+```bash
+inkwell games list
+inkwell games show --game my-game
+inkwell games update --game my-game --title "New title" --summary "New summary"
+inkwell games media upload new-cover.png --game my-game --kind cover --alt "Game cover"
+inkwell games media upload room.png --game my-game --kind screenshot --alt "A dungeon room"
+```
 
 ```bash
 inkwell init --game my-game --directory dist --engine web

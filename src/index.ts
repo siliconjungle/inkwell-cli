@@ -29,6 +29,8 @@ const CONFIG_FILES = ["inkwell.config.ts", "inkwell.config.mjs", "inkwell.config
 const MAX_BACKEND_BUNDLE_BYTES = 10 * 1024 * 1024;
 const MAX_SECRET_VALUE_BYTES = 64 * 1024;
 const MAX_SECRETS_PAYLOAD_BYTES = 256 * 1024;
+const MAX_PAGE_IMAGE_BYTES = 5 * 1024 * 1024;
+const PAGE_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 
 type Config = {
   token?: string;
@@ -48,8 +50,13 @@ type BuildFile = {
   size: number;
 };
 
-type ManifestEntry = { path: string; size: number; sha256: string; contentType: string; contentEncoding?: "br" | "gzip" };
-
+type ManifestEntry = {
+  path: string;
+  size: number;
+  sha256: string;
+  contentType: string;
+  contentEncoding?: "br" | "gzip";
+};
 
 function configPath() {
   const root = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
@@ -73,6 +80,14 @@ async function writeConfig(config: Config) {
 function valueAfter(args: string[], flag: string) {
   const index = args.indexOf(flag);
   return index === -1 ? undefined : args[index + 1];
+}
+
+function valuesAfter(args: string[], flag: string) {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === flag && args[index + 1]) values.push(args[index + 1]!);
+  }
+  return values;
 }
 
 function firstPositional(args: string[]) {
@@ -126,7 +141,10 @@ async function collectBuildFiles(root: string, current = root): Promise<BuildFil
 export function assetMetadata(path: string) {
   const encoding = path.endsWith(".br") ? "br" : path.endsWith(".gz") ? "gzip" : undefined;
   const originalPath = encoding ? path.slice(0, -3) : path;
-  return { contentType: contentType(originalPath), ...(encoding ? { contentEncoding: encoding as "br" | "gzip" } : {}) };
+  return {
+    contentType: contentType(originalPath),
+    ...(encoding ? { contentEncoding: encoding as "br" | "gzip" } : {}),
+  };
 }
 
 function contentType(path: string) {
@@ -198,8 +216,7 @@ export function createUploadBatches(files: BuildFile[]) {
   for (const file of files) {
     if (
       batch.length &&
-      (batch.length >= MAX_BATCH_FILES ||
-        batchBytes + file.size > MAX_MULTIPART_BATCH_BYTES)
+      (batch.length >= MAX_BATCH_FILES || batchBytes + file.size > MAX_MULTIPART_BATCH_BYTES)
     ) {
       batches.push(batch);
       batch = [];
@@ -213,9 +230,7 @@ export function createUploadBatches(files: BuildFile[]) {
 }
 
 export function createUploadPlan(files: BuildFile[]) {
-  const directFiles = files.filter(
-    (file) => file.size > MAX_MULTIPART_BATCH_BYTES,
-  );
+  const directFiles = files.filter((file) => file.size > MAX_MULTIPART_BATCH_BYTES);
   const batches = createUploadBatches(
     files.filter((file) => file.size <= MAX_MULTIPART_BATCH_BYTES),
   );
@@ -231,7 +246,12 @@ export function multipartUploadRequest(form: FormData): RequestInit {
 async function findConfig(root = process.cwd()) {
   for (const name of CONFIG_FILES) {
     const path = join(root, name);
-    if (await access(path).then(() => true).catch(() => false)) return path;
+    if (
+      await access(path)
+        .then(() => true)
+        .catch(() => false)
+    )
+      return path;
   }
   return null;
 }
@@ -311,16 +331,23 @@ async function apiRequest(
 
   const apiUrl =
     credentials.apiUrl || process.env.INKWELL_API_URL || config.apiUrl || DEFAULT_API_URL;
-  const response = await fetchWithUploadRetry(new URL(path, apiUrl), {
-    ...init,
-    headers: (() => {
-      const headers = new Headers(init.headers);
-      headers.set("authorization", `Bearer ${token}`);
-      return headers;
-    })(),
-  }, {
-    onRetry: (attempt, status) => console.log(`Upload interrupted${status ? ` (HTTP ${status})` : ''}; retrying the same data (${attempt}/3)…`),
-  });
+  const response = await fetchWithUploadRetry(
+    new URL(path, apiUrl),
+    {
+      ...init,
+      headers: (() => {
+        const headers = new Headers(init.headers);
+        headers.set("authorization", `Bearer ${token}`);
+        return headers;
+      })(),
+    },
+    {
+      onRetry: (attempt, status) =>
+        console.log(
+          `Upload interrupted${status ? ` (HTTP ${status})` : ""}; retrying the same data (${attempt}/3)…`,
+        ),
+    },
+  );
 
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {
@@ -334,7 +361,7 @@ async function apiRequest(
     if (response.status === 429 && attempt < 4) {
       const delay = Math.min(60, Math.max(1, Number(retryAfter) || 60));
       console.log(`Upload rate limit reached; resuming in ${delay} seconds…`);
-      await new Promise(resolve => setTimeout(resolve, delay * 1000));
+      await new Promise((resolve) => setTimeout(resolve, delay * 1000));
       return apiRequest(path, init, credentials, attempt + 1);
     }
     throw new Error(
@@ -355,10 +382,8 @@ export async function requestGithubActionsCredentials(
     fetcher?: typeof fetch;
   } = {},
 ): Promise<GithubActionsCredentials | null> {
-  const requestUrl =
-    options.requestUrl ?? process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
-  const requestToken =
-    options.requestToken ?? process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+  const requestUrl = options.requestUrl ?? process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+  const requestToken = options.requestToken ?? process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
   if (!requestUrl || !requestToken) return null;
   const fetcher = options.fetcher || fetch;
   const apiUrl = options.apiUrl || process.env.INKWELL_API_URL || DEFAULT_API_URL;
@@ -455,6 +480,202 @@ async function logout() {
 async function whoami() {
   const profile = await apiRequest("/api/v1/me");
   console.log(typeof profile.email === "string" ? profile.email : JSON.stringify(profile, null, 2));
+}
+
+export function docsPath(topic?: string) {
+  if (!topic) return "/docs.md";
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(topic)) {
+    throw new Error("Documentation topics use lowercase letters, numbers, and hyphens.");
+  }
+  return `/docs/${topic}.md`;
+}
+
+async function docsCommand(args: string[]) {
+  const topic = firstPositional(args);
+  const configured = await readConfig();
+  const apiUrl = process.env.INKWELL_API_URL || configured.apiUrl || DEFAULT_API_URL;
+  const response = await fetch(new URL(docsPath(topic), apiUrl), {
+    headers: { accept: "text/markdown" },
+  });
+  if (!response.ok) {
+    throw new Error(
+      response.status === 404
+        ? `Unknown documentation topic: ${topic}. Run \`inkwell docs\` to list topics.`
+        : `Could not fetch documentation (${response.status}).`,
+    );
+  }
+  const markdown = await response.text();
+  const destination = valueAfter(args, "--output");
+  if (destination) {
+    await writeFile(resolve(destination), markdown);
+    console.log(`Saved ${topic || "documentation index"} to ${destination}.`);
+    return;
+  }
+  output.write(markdown.endsWith("\n") ? markdown : `${markdown}\n`);
+}
+
+type GameMetadata = {
+  title?: string;
+  description?: string | null;
+  genreTags?: string[];
+  longDescriptionMarkdown?: string | null;
+  visibility?: "private" | "unlisted" | "public";
+};
+
+export async function gameMetadataFromArgs(args: string[], creating = false) {
+  const metadata: GameMetadata = {};
+  const title = valueAfter(args, "--title");
+  const summary = valueAfter(args, "--summary");
+  const tags = valueAfter(args, "--tags");
+  const descriptionFile = valueAfter(args, "--description-file");
+  const visibility = valueAfter(args, "--visibility");
+
+  if (creating && !title?.trim()) {
+    throw new Error("Choose a title with `--title <title>`.");
+  }
+  if (title !== undefined) metadata.title = title.trim();
+  if (summary !== undefined) metadata.description = summary.trim() || null;
+  if (tags !== undefined) {
+    metadata.genreTags = [
+      ...new Set(
+        tags
+          .split(",")
+          .map((tag) => tag.trim())
+          .filter(Boolean),
+      ),
+    ];
+  }
+  if (descriptionFile !== undefined) {
+    metadata.longDescriptionMarkdown =
+      (await readFile(resolve(descriptionFile), "utf8")).trim() || null;
+  }
+  if (visibility !== undefined) {
+    if (!new Set(["private", "unlisted", "public"]).has(visibility)) {
+      throw new Error("Visibility must be private, unlisted, or public.");
+    }
+    if (creating && visibility === "public") {
+      throw new Error(
+        "Create the game as private or unlisted, publish a build, then make it public.",
+      );
+    }
+    metadata.visibility = visibility as GameMetadata["visibility"];
+  }
+  return metadata;
+}
+
+export function pageImageContentType(path: string) {
+  const type = contentType(path).split(";")[0]!;
+  if (!PAGE_IMAGE_TYPES.has(type)) {
+    throw new Error("Page images must be JPEG, PNG, WebP, or GIF files.");
+  }
+  return type;
+}
+
+async function uploadGameMedia(
+  game: string,
+  path: string,
+  kind: "cover" | "screenshot",
+  alt?: string,
+) {
+  const absolutePath = resolve(path);
+  const info = await stat(absolutePath).catch(() => null);
+  if (!info?.isFile()) throw new Error(`Image not found: ${path}`);
+  if (!info.size || info.size > MAX_PAGE_IMAGE_BYTES) {
+    throw new Error("Page images must be between 1 byte and 5 MB.");
+  }
+  const contentType = pageImageContentType(absolutePath);
+  const query = new URLSearchParams({ kind });
+  if (alt?.trim()) query.set("alt", alt.trim());
+  const result = await apiRequest(`/api/v1/games/${encodeURIComponent(game)}/media?${query}`, {
+    method: "POST",
+    headers: { "content-type": contentType },
+    body: await readFile(absolutePath),
+  });
+  const url = typeof result.url === "string" ? ` (${result.url})` : "";
+  console.log(`Uploaded ${kind} ${basename(path)}${url}.`);
+}
+
+async function gamesCommand(args: string[]) {
+  const action = args[0];
+  const actionArgs = args.slice(1);
+
+  switch (action) {
+    case "list": {
+      const result = await apiRequest("/api/v1/games");
+      const games = Array.isArray(result.games) ? result.games : [];
+      if (!games.length) {
+        console.log("No games found.");
+        return;
+      }
+      for (const game of games) {
+        if (!game || typeof game !== "object") continue;
+        const row = game as Record<string, unknown>;
+        console.log(
+          `${String(row.slug || "")}` +
+            `${typeof row.visibility === "string" ? `\t${row.visibility}` : ""}` +
+            `${typeof row.title === "string" ? `\t${row.title}` : ""}`,
+        );
+      }
+      return;
+    }
+    case "show": {
+      const game = requireGame(actionArgs);
+      const result = await apiRequest(`/api/v1/games/${encodeURIComponent(game)}`);
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    case "create": {
+      const game = requireGame(actionArgs);
+      const metadata = await gameMetadataFromArgs(actionArgs, true);
+      const result = await apiRequest("/api/v1/games", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slug: game, visibility: "private", ...metadata }),
+      });
+      console.log(`Created ${game}.`);
+      const cover = valueAfter(actionArgs, "--cover");
+      if (cover) await uploadGameMedia(game, cover, "cover", valueAfter(actionArgs, "--cover-alt"));
+      for (const screenshot of valuesAfter(actionArgs, "--screenshot")) {
+        await uploadGameMedia(game, screenshot, "screenshot");
+      }
+      const created = result.game as Record<string, unknown> | undefined;
+      console.log(
+        `Manage: ${DEFAULT_API_URL}/dashboard/games/${encodeURIComponent(String(created?.slug || game))}`,
+      );
+      return;
+    }
+    case "update": {
+      const game = requireGame(actionArgs);
+      const metadata = await gameMetadataFromArgs(actionArgs);
+      if (!Object.keys(metadata).length) throw new Error("Provide metadata to update.");
+      await apiRequest(`/api/v1/games/${encodeURIComponent(game)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(metadata),
+      });
+      console.log(`Updated ${game}.`);
+      return;
+    }
+    case "media": {
+      if (actionArgs[0] !== "upload") {
+        throw new Error(
+          "Use `inkwell games media upload <file> --game <slug> --kind cover|screenshot`.",
+        );
+      }
+      const mediaArgs = actionArgs.slice(1);
+      const game = requireGame(mediaArgs);
+      const path = firstPositional(mediaArgs);
+      const kind = valueAfter(mediaArgs, "--kind");
+      if (!path) throw new Error("Choose an image file to upload.");
+      if (kind !== "cover" && kind !== "screenshot") {
+        throw new Error("Image kind must be cover or screenshot.");
+      }
+      await uploadGameMedia(game, path, kind, valueAfter(mediaArgs, "--alt"));
+      return;
+    }
+    default:
+      throw new Error("Use `inkwell games list|show|create|update|media`.");
+  }
 }
 
 function requireGame(args: string[]) {
@@ -628,7 +849,11 @@ async function secretsCommand(args: string[]) {
 async function deploy(args: string[]) {
   const project = await loadGameConfig();
   const directory = firstPositional(args) || project?.config.client.directory || ".";
-  const game = valueAfter(args, "--game") || valueAfter(args, "-g") || project?.config.game || requireGame(args);
+  const game =
+    valueAfter(args, "--game") ||
+    valueAfter(args, "-g") ||
+    project?.config.game ||
+    requireGame(args);
 
   process.stdout.write(`Packaging ${basename(resolve(directory))}... `);
   const build = await packageBuild(directory, project?.config.client.entrypoint);
@@ -636,9 +861,7 @@ async function deploy(args: string[]) {
 
   const configured = await readConfig();
   const hasDeployToken = Boolean(process.env.INKWELL_TOKEN || configured.token);
-  const actionsCredentials = hasDeployToken
-    ? null
-    : await requestGithubActionsCredentials(game);
+  const actionsCredentials = hasDeployToken ? null : await requestGithubActionsCredentials(game);
   const credentials = actionsCredentials || {};
   const shouldPublish = args.includes("--publish") && actionsCredentials?.target !== "preview";
 
@@ -687,7 +910,8 @@ async function deploy(args: string[]) {
           buildRecord.publicId,
           file,
           (path, init) => apiRequest(path, init, credentials),
-          (done, total) => process.stdout.write(`Uploading ${file.archivePath}: ${done}/${total} chunks…\r`),
+          (done, total) =>
+            process.stdout.write(`Uploading ${file.archivePath}: ${done}/${total} chunks…\r`),
         );
         uploaded += 1;
       }
@@ -729,7 +953,11 @@ async function deploy(args: string[]) {
     // first so a failed server build cannot publish a client that depends on it.
     const result = await apiRequest(
       `/api/v1/builds/${buildRecord.publicId}/finalize`,
-      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: shouldPublish }) },
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publish: shouldPublish }),
+      },
       credentials,
     );
     console.log(
@@ -737,7 +965,11 @@ async function deploy(args: string[]) {
         ? `${actionsCredentials.target === "production" ? "Production" : "Preview"} deployment complete.`
         : "Deployment complete.",
     );
-    console.log(shouldPublish ? "Build published." : "Draft uploaded. Preview it, then run inkwell publish <build-id> to make it live.");
+    console.log(
+      shouldPublish
+        ? "Build published."
+        : "Draft uploaded. Preview it, then run inkwell publish <build-id> to make it live.",
+    );
     console.log(`Build: ${buildRecord.publicId}`);
     if (typeof result.pageUrl === "string") console.log(result.pageUrl);
     if (actionsCredentials) {
@@ -762,7 +994,16 @@ Usage:
   inkwell login [token]
   inkwell logout
   inkwell whoami
+  inkwell docs [topic] [--output file]
   inkwell init --game <slug> [--directory dist] [--engine godot|unity|web|unreal]
+  inkwell games list
+  inkwell games show --game <slug>
+  inkwell games create --game <slug> --title <title> [--visibility private|unlisted]
+    [--summary <text>] [--description-file README.md] [--tags action,multiplayer]
+    [--cover cover.png] [--screenshot shot-1.png ...]
+  inkwell games update --game <slug> [--title <title>] [--visibility private|unlisted|public]
+    [--summary <text>] [--description-file README.md] [--tags action,multiplayer]
+  inkwell games media upload <file> --game <slug> --kind cover|screenshot [--alt <text>]
   inkwell deploy [directory] [--game <slug>] [--publish]
   inkwell publish <build-id>
   inkwell secrets list --game <slug>
@@ -791,22 +1032,45 @@ async function main() {
     case "whoami":
       await whoami();
       break;
+    case "docs":
+      await docsCommand(args);
+      break;
     case "init": {
-      const directory = valueAfter(args, '--directory') || 'dist';
-      const name = valueAfter(args, '--engine');
-      const version = valueAfter(args, '--engine-version');
-      const config = validateGameConfig({game: requireGame(args), client: {directory, entrypoint: valueAfter(args, '--entrypoint') || 'index.html', ...(name ? {engine: {name, ...(version ? {version} : {})}} : {}), capabilities: {threads: args.includes('--threads')}, startup: {mode: 'handshake', timeoutMs: 120000}}});
-      if (await findConfig()) throw new Error('This project already has an Inkwell config. Edit it to change export settings.');
-      await writeFile(join(process.cwd(), 'inkwell.config.js'), `export default ${JSON.stringify(config, null, 2)};\n`, {flag: 'wx'});
-      console.log('Created inkwell.config.js. Call Inkwell.ready() when the game is playable.');
+      const directory = valueAfter(args, "--directory") || "dist";
+      const name = valueAfter(args, "--engine");
+      const version = valueAfter(args, "--engine-version");
+      const config = validateGameConfig({
+        game: requireGame(args),
+        client: {
+          directory,
+          entrypoint: valueAfter(args, "--entrypoint") || "index.html",
+          ...(name ? { engine: { name, ...(version ? { version } : {}) } } : {}),
+          capabilities: { threads: args.includes("--threads") },
+          startup: { mode: "handshake", timeoutMs: 120000 },
+        },
+      });
+      if (await findConfig())
+        throw new Error(
+          "This project already has an Inkwell config. Edit it to change export settings.",
+        );
+      await writeFile(
+        join(process.cwd(), "inkwell.config.js"),
+        `export default ${JSON.stringify(config, null, 2)};\n`,
+        { flag: "wx" },
+      );
+      console.log("Created inkwell.config.js. Call Inkwell.ready() when the game is playable.");
       break;
     }
+    case "games":
+      await gamesCommand(args);
+      break;
     case "publish": {
       const buildId = firstPositional(args);
-      if (!buildId || !/^[a-z0-9]{10,32}$/.test(buildId)) throw new Error('Provide the build ID printed by inkwell deploy.');
-      const result = await apiRequest(`/api/v1/builds/${buildId}/publish`, {method: 'POST'});
-      console.log('Build published.');
-      if (typeof result.pageUrl === 'string') console.log(result.pageUrl);
+      if (!buildId || !/^[a-z0-9]{10,32}$/.test(buildId))
+        throw new Error("Provide the build ID printed by inkwell deploy.");
+      const result = await apiRequest(`/api/v1/builds/${buildId}/publish`, { method: "POST" });
+      console.log("Build published.");
+      if (typeof result.pageUrl === "string") console.log(result.pageUrl);
       break;
     }
     case "deploy":
