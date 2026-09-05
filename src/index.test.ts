@@ -16,6 +16,7 @@ import {
   loadGameConfig,
   packageBuild,
   pageImageContentType,
+  pollDeviceAuthorization,
   requestGithubActionsCredentials,
   validateSecretName,
   validateSecretValues,
@@ -89,6 +90,65 @@ void test("does not attempt OIDC outside GitHub Actions", async () => {
       requestToken: "",
     }),
     null,
+  );
+});
+
+void test("browser login waits through pending authorization and returns the issued token", async () => {
+  let requests = 0;
+  let clock = 0;
+  const token = await pollDeviceAuthorization(
+    {
+      deviceCode: "device-secret",
+      userCode: "INKW-ELL1",
+      verificationUri: "https://inkwell.example/cli/authorize",
+      verificationUriComplete: "https://inkwell.example/cli/authorize?code=INKW-ELL1",
+      expiresIn: 60,
+      interval: 1,
+    },
+    "https://inkwell.example",
+    {
+      now: () => clock,
+      wait: async (milliseconds) => {
+        clock += milliseconds;
+      },
+      fetcher: (async (input, init) => {
+        requests += 1;
+        assert.equal(String(input), "https://inkwell.example/api/v1/cli/auth/token");
+        assert.equal(init?.method, "POST");
+        assert.deepEqual(JSON.parse(String(init?.body)), { deviceCode: "device-secret" });
+        return requests === 1
+          ? Response.json({ status: "authorization_pending" }, { status: 202 })
+          : Response.json({ token: "ink_browser_authorized" });
+      }) as typeof fetch,
+    },
+  );
+  assert.equal(token, "ink_browser_authorized");
+  assert.equal(requests, 2);
+});
+
+void test("browser login surfaces denial instead of polling forever", async () => {
+  let clock = 0;
+  await assert.rejects(
+    pollDeviceAuthorization(
+      {
+        deviceCode: "device-secret",
+        userCode: "INKW-ELL1",
+        verificationUri: "https://inkwell.example/cli/authorize",
+        verificationUriComplete: "https://inkwell.example/cli/authorize?code=INKW-ELL1",
+        expiresIn: 60,
+        interval: 1,
+      },
+      "https://inkwell.example",
+      {
+        now: () => clock,
+        wait: async (milliseconds) => {
+          clock += milliseconds;
+        },
+        fetcher: (async () =>
+          Response.json({ error: "Authorization was declined." }, { status: 403 })) as typeof fetch,
+      },
+    ),
+    /declined/,
   );
 });
 
