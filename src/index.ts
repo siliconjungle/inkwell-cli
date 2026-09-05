@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { createReadStream, realpathSync } from "node:fs";
 import { uploadLargeFile } from "./chunk-upload.js";
 import { fetchWithUploadRetry } from "./upload-request.js";
@@ -451,18 +452,14 @@ async function finishGithubActionsDeployment(
 
 async function login(args: string[]) {
   let token = firstPositional(args) || process.env.INKWELL_TOKEN;
-  if (!token) {
-    console.log("Create an API key at https://inkwell.ing/developer/keys");
-    const prompt = createInterface({ input, output });
-    token = (await prompt.question("Paste token: ")).trim();
-    prompt.close();
-  }
-  if (!token) throw new Error("A deploy token is required.");
-
   const current = await readConfig();
   const apiUrl = process.env.INKWELL_API_URL || current.apiUrl || DEFAULT_API_URL;
+  if (!token) {
+    token = await browserLogin(apiUrl);
+  }
+  if (!token) throw new Error("Inkwell did not issue a CLI credential.");
   const profile = await apiRequest("/api/v1/me", {}, { token, apiUrl });
-  await writeConfig({ ...current, token });
+  await writeConfig({ ...current, token, apiUrl });
   const identity =
     typeof profile.username === "string"
       ? ` as @${profile.username}`
@@ -472,6 +469,97 @@ async function login(args: string[]) {
   console.log(`Signed in to Inkwell${identity}.`);
 }
 
+function openBrowser(url: string) {
+  const command =
+    process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  try {
+    const child = spawn(command, args, { detached: true, stdio: "ignore" });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type DeviceAuthorization = {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete: string;
+  expiresIn: number;
+  interval: number;
+};
+
+export async function pollDeviceAuthorization(
+  authorization: DeviceAuthorization,
+  apiUrl: string,
+  options: {
+    fetcher?: typeof fetch;
+    wait?: (milliseconds: number) => Promise<void>;
+    now?: () => number;
+  } = {},
+) {
+  const fetcher = options.fetcher || fetch;
+  const wait = options.wait || ((milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  const now = options.now || Date.now;
+  const deadline = now() + authorization.expiresIn * 1_000;
+  while (now() < deadline) {
+    await wait(Math.max(1, authorization.interval) * 1_000);
+    const response = await fetcher(new URL("/api/v1/cli/auth/token", apiUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceCode: authorization.deviceCode }),
+    });
+    const result = (await response.json().catch(() => ({}))) as {
+      token?: unknown;
+      status?: unknown;
+      error?: unknown;
+    };
+    if (response.status === 202 || response.status === 429) continue;
+    if (!response.ok || typeof result.token !== "string") {
+      throw new Error(
+        typeof result.error === "string" ? result.error : "CLI authorization failed.",
+      );
+    }
+    return result.token;
+  }
+  throw new Error("CLI authorization expired. Run `inkwell login` again.");
+}
+
+async function browserLogin(apiUrl: string) {
+  const response = await fetch(new URL("/api/v1/cli/auth/device", apiUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ clientName: `Inkwell CLI on ${process.platform}` }),
+  });
+  const authorization = (await response.json().catch(() => ({}))) as Partial<DeviceAuthorization> & {
+    error?: unknown;
+  };
+  if (
+    !response.ok ||
+    typeof authorization.deviceCode !== "string" ||
+    typeof authorization.userCode !== "string" ||
+    typeof authorization.verificationUri !== "string" ||
+    typeof authorization.verificationUriComplete !== "string" ||
+    typeof authorization.expiresIn !== "number" ||
+    typeof authorization.interval !== "number"
+  ) {
+    throw new Error(
+      typeof authorization.error === "string"
+        ? authorization.error
+        : "Could not start browser sign-in.",
+    );
+  }
+  console.log(`Confirm code ${authorization.userCode} in your browser:`);
+  console.log(authorization.verificationUriComplete);
+  if (!openBrowser(authorization.verificationUriComplete)) {
+    console.log("Open the link above to continue.");
+  }
+  console.log("Waiting for authorization…");
+  return pollDeviceAuthorization(authorization as DeviceAuthorization, apiUrl);
+}
+
 async function logout() {
   await unlink(configPath()).catch(() => undefined);
   console.log("Signed out.");
@@ -479,7 +567,236 @@ async function logout() {
 
 async function whoami() {
   const profile = await apiRequest("/api/v1/me");
-  console.log(typeof profile.email === "string" ? profile.email : JSON.stringify(profile, null, 2));
+  const username = typeof profile.username === "string" ? `@${profile.username}` : "Unknown user";
+  const email = typeof profile.email === "string" ? ` (${profile.email})` : "";
+  console.log(`${username}${email}`);
+  console.log(
+    profile.hasCreatorAccess
+      ? "Creator access: approved"
+      : profile.creatorAccessRequestStatus === "pending"
+        ? "Creator access: awaiting Jungle's review"
+        : "Creator access: not approved (request it from your account menu)",
+  );
+}
+
+async function gameForCommand(args: string[]) {
+  const explicit = valueAfter(args, "--game") || valueAfter(args, "-g");
+  if (explicit) return explicit;
+  const project = await loadGameConfig();
+  if (project?.config.game) return project.config.game;
+  throw new Error("Provide --game <slug> or run this command from an Inkwell project.");
+}
+
+function displayTimestamp(value: unknown) {
+  return typeof value === "string" && value ? new Date(value).toLocaleString() : "never";
+}
+
+async function statusCommand(args: string[]) {
+  const game = await gameForCommand(args);
+  const result = await apiRequest(`/api/v1/games/${encodeURIComponent(game)}/status`);
+  const health = (result.health || {}) as Record<string, { status?: unknown; message?: unknown }>;
+  console.log(`${String((result.game as { title?: unknown })?.title || game)} (${game})`);
+  for (const name of ["client", "backend", "analytics"]) {
+    const item = health[name];
+    console.log(
+      `${name.padEnd(10)} ${String(item?.status || "unknown").padEnd(8)} ${String(item?.message || "No health information.")}`,
+    );
+  }
+  const sessions = (result.sessions24h || {}) as Record<string, unknown>;
+  console.log(
+    `players    ${Number(sessions.active || 0)} now · ${Number(sessions.started || 0)} starts/24h · ${Number(sessions.loadingFailed || 0)} loading failures`,
+  );
+  const backend = result.backend as Record<string, unknown> | null;
+  if (backend) {
+    console.log(
+      `network    ${Number(backend.activeConnections || 0)}/${Number(backend.maxConnections || 0)} connections · ${String(backend.region || "unknown region")} · heartbeat ${displayTimestamp(backend.lastHeartbeatAt)}`,
+    );
+  }
+  const latestBuild = result.latestBuild as Record<string, unknown> | null;
+  const latestBackend = result.latestBackendDeployment as Record<string, unknown> | null;
+  const latestGithub = result.latestGithubDeployment as Record<string, unknown> | null;
+  if (latestBuild)
+    console.log(`client     ${String(latestBuild.status)} · build ${String(latestBuild.publicId)}`);
+  if (latestBackend)
+    console.log(`server     ${String(latestBackend.status)} · deployment ${String(latestBackend.publicId)}`);
+  if (latestGithub)
+    console.log(`github     ${String(latestGithub.status)} · run ${String(latestGithub.runId)}`);
+}
+
+type CreatorLog = {
+  id: string;
+  requestId?: string | null;
+  level: string;
+  message: string;
+  occurredAt: string;
+};
+
+function printCreatorLog(log: CreatorLog) {
+  const request = log.requestId ? ` request=${log.requestId}` : "";
+  console.log(`${displayTimestamp(log.occurredAt)} ${log.level.toUpperCase().padEnd(5)} ${log.message}${request}`);
+}
+
+async function logsCommand(args: string[]) {
+  const game = await gameForCommand(args);
+  const level = valueAfter(args, "--level");
+  if (level && !["debug", "info", "warn", "error"].includes(level))
+    throw new Error("--level must be debug, info, warn, or error.");
+  const query = new URLSearchParams({ limit: valueAfter(args, "--limit") || "100" });
+  if (level) query.set("level", level);
+  const read = async () => {
+    const result = await apiRequest(
+      `/api/v1/games/${encodeURIComponent(game)}/logs?${query.toString()}`,
+    );
+    return Array.isArray(result.logs) ? (result.logs as CreatorLog[]) : [];
+  };
+  const initial = await read();
+  for (const log of [...initial].reverse()) printCreatorLog(log);
+  if (!args.includes("--follow")) return;
+  console.log("Following logs; press Ctrl+C to stop.");
+  const seen = new Set(initial.map((log) => log.id));
+  while (true) {
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    const logs = await read();
+    for (const log of [...logs].reverse()) {
+      if (seen.has(log.id)) continue;
+      seen.add(log.id);
+      printCreatorLog(log);
+    }
+    if (seen.size > 2_000) seen.clear();
+  }
+}
+
+type DoctorCheck = { label: string; status: "pass" | "warn" | "fail"; detail: string };
+
+export async function doctor(options: { fetcher?: typeof fetch } = {}) {
+  const fetcher = options.fetcher || fetch;
+  const configured = await readConfig();
+  const apiUrl = process.env.INKWELL_API_URL || configured.apiUrl || DEFAULT_API_URL;
+  const checks: DoctorCheck[] = [];
+  const nodeMajor = Number(process.versions.node.split(".")[0]);
+  checks.push({
+    label: "Node.js",
+    status: nodeMajor >= 22 ? "pass" : "fail",
+    detail: `${process.versions.node}${nodeMajor >= 22 ? "" : "; Node 22.13 or newer is required"}`,
+  });
+  try {
+    const response = await fetcher(new URL("/api/v1/limits", apiUrl), {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(10_000),
+    });
+    checks.push({
+      label: "Platform",
+      status: response.ok ? "pass" : "fail",
+      detail: response.ok ? apiUrl : `HTTP ${response.status}`,
+    });
+  } catch (error) {
+    checks.push({
+      label: "Platform",
+      status: "fail",
+      detail: error instanceof Error ? error.message : "unreachable",
+    });
+  }
+  const token = process.env.INKWELL_TOKEN || configured.token;
+  let profile: Record<string, unknown> | null = null;
+  if (!token) {
+    checks.push({
+      label: "Authentication",
+      status: "fail",
+      detail: "not signed in; run `inkwell login`",
+    });
+  } else {
+    try {
+      const response = await fetcher(new URL("/api/v1/me", apiUrl), {
+        headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+      profile = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      checks.push({
+        label: "Authentication",
+        status: response.ok ? "pass" : "fail",
+        detail:
+          response.ok && typeof profile?.username === "string"
+            ? `@${profile.username}`
+            : `HTTP ${response.status}; run \`inkwell login\` again`,
+      });
+      checks.push({
+        label: "Creator access",
+        status: profile?.hasCreatorAccess
+          ? "pass"
+          : profile?.creatorAccessRequestStatus === "pending"
+            ? "warn"
+            : "fail",
+        detail: profile?.hasCreatorAccess
+          ? "approved"
+          : profile?.creatorAccessRequestStatus === "pending"
+            ? "awaiting Jungle's review"
+            : "request access from the account menu on inkwell.ing",
+      });
+    } catch (error) {
+      checks.push({
+        label: "Authentication",
+        status: "fail",
+        detail: error instanceof Error ? error.message : "request failed",
+      });
+    }
+  }
+  const project = await loadGameConfig().catch(() => null);
+  if (!project) {
+    checks.push({
+      label: "Project",
+      status: "warn",
+      detail: "no inkwell.config.js/ts/mjs in this directory",
+    });
+  } else {
+    const directory = resolve(project.root, project.config.client.directory || ".");
+    const entrypoint = resolve(directory, project.config.client.entrypoint || "index.html");
+    const configuredGame = project.config.game;
+    const directoryExists = await stat(directory)
+      .then((value) => value.isDirectory())
+      .catch(() => false);
+    const entrypointExists = await stat(entrypoint)
+      .then((value) => value.isFile())
+      .catch(() => false);
+    checks.push({
+      label: "Project",
+      status: directoryExists && entrypointExists ? "pass" : "warn",
+      detail:
+        directoryExists && entrypointExists
+          ? `${configuredGame || "game slug not configured"} · ${relative(process.cwd(), entrypoint)}`
+          : `build output missing at ${relative(process.cwd(), entrypoint)}; run your build first`,
+    });
+    if (token && profile?.hasCreatorAccess && configuredGame) {
+      try {
+        const response = await fetcher(
+          new URL(`/api/v1/games/${encodeURIComponent(configuredGame)}`, apiUrl),
+          {
+            headers: { authorization: `Bearer ${token}` },
+            signal: AbortSignal.timeout(10_000),
+          },
+        );
+        checks.push({
+          label: "Game",
+          status: response.ok ? "pass" : response.status === 404 ? "warn" : "fail",
+          detail: response.ok
+            ? `${configuredGame} is accessible`
+            : response.status === 404
+              ? "not created yet; run `inkwell games create`"
+              : `HTTP ${response.status}`,
+        });
+      } catch (error) {
+        checks.push({
+          label: "Game",
+          status: "fail",
+          detail: error instanceof Error ? error.message : "request failed",
+        });
+      }
+    }
+  }
+  for (const check of checks) {
+    console.log(`${check.status === "pass" ? "✓" : check.status === "warn" ? "!" : "✗"} ${check.label}: ${check.detail}`);
+  }
+  if (checks.some((check) => check.status === "fail")) process.exitCode = 1;
+  return checks;
 }
 
 export function docsPath(topic?: string) {
@@ -576,6 +893,7 @@ async function uploadGameMedia(
   path: string,
   kind: "cover" | "screenshot",
   alt?: string,
+  focal?: { x?: string; y?: string },
 ) {
   const absolutePath = resolve(path);
   const info = await stat(absolutePath).catch(() => null);
@@ -586,6 +904,13 @@ async function uploadGameMedia(
   const contentType = pageImageContentType(absolutePath);
   const query = new URLSearchParams({ kind });
   if (alt?.trim()) query.set("alt", alt.trim());
+  for (const [queryName, value] of [["focalX", focal?.x], ["focalY", focal?.y]] as const) {
+    if (value === undefined) continue;
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0 || number > 100)
+      throw new Error("Cover focal positions must be numbers from 0 to 100.");
+    query.set(queryName, String(number));
+  }
   const result = await apiRequest(`/api/v1/games/${encodeURIComponent(game)}/media?${query}`, {
     method: "POST",
     headers: { "content-type": contentType },
@@ -634,7 +959,11 @@ async function gamesCommand(args: string[]) {
       });
       console.log(`Created ${game}.`);
       const cover = valueAfter(actionArgs, "--cover");
-      if (cover) await uploadGameMedia(game, cover, "cover", valueAfter(actionArgs, "--cover-alt"));
+      if (cover)
+        await uploadGameMedia(game, cover, "cover", valueAfter(actionArgs, "--cover-alt"), {
+          x: valueAfter(actionArgs, "--cover-focal-x"),
+          y: valueAfter(actionArgs, "--cover-focal-y"),
+        });
       for (const screenshot of valuesAfter(actionArgs, "--screenshot")) {
         await uploadGameMedia(game, screenshot, "screenshot");
       }
@@ -670,7 +999,10 @@ async function gamesCommand(args: string[]) {
       if (kind !== "cover" && kind !== "screenshot") {
         throw new Error("Image kind must be cover or screenshot.");
       }
-      await uploadGameMedia(game, path, kind, valueAfter(mediaArgs, "--alt"));
+      await uploadGameMedia(game, path, kind, valueAfter(mediaArgs, "--alt"), {
+        x: valueAfter(mediaArgs, "--focal-x"),
+        y: valueAfter(mediaArgs, "--focal-y"),
+      });
       return;
     }
     default:
@@ -994,6 +1326,9 @@ Usage:
   inkwell login [token]
   inkwell logout
   inkwell whoami
+  inkwell doctor
+  inkwell status [--game <slug>]
+  inkwell logs [--game <slug>] [--level debug|info|warn|error] [--follow]
   inkwell docs [topic] [--output file]
   inkwell init --game <slug> [--directory dist] [--engine godot|unity|web|unreal]
   inkwell games list
@@ -1004,6 +1339,7 @@ Usage:
   inkwell games update --game <slug> [--title <title>] [--visibility private|unlisted|public]
     [--summary <text>] [--description-file README.md] [--tags action,multiplayer]
   inkwell games media upload <file> --game <slug> --kind cover|screenshot [--alt <text>]
+    [--focal-x 0..100] [--focal-y 0..100]
   inkwell deploy [directory] [--game <slug>] [--publish]
   inkwell publish <build-id>
   inkwell secrets list --game <slug>
@@ -1031,6 +1367,15 @@ async function main() {
       break;
     case "whoami":
       await whoami();
+      break;
+    case "doctor":
+      await doctor();
+      break;
+    case "status":
+      await statusCommand(args);
+      break;
+    case "logs":
+      await logsCommand(args);
       break;
     case "docs":
       await docsCommand(args);

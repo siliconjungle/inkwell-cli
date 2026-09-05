@@ -12,13 +12,21 @@ npm install --global @silicon-jungle/inkwell-cli
 
 ## Sign in
 
-Create a deploy token in your Inkwell account, then save it locally:
+Start sign-in from the terminal:
 
 ```bash
 inkwell login
 ```
 
-The token is stored in your user configuration directory with owner-only file permissions. CI can use the `INKWELL_TOKEN` environment variable instead.
+The CLI opens Inkwell in your browser, shows a matching one-time code, and waits for you to approve the device. No copied token is required. The resulting credential is stored in your user configuration directory with owner-only file permissions. Run `inkwell whoami` to confirm the account and creator-access state, or `inkwell doctor` to check the complete local setup. CI can use the `INKWELL_TOKEN` environment variable instead.
+
+Operational commands work with `--game <slug>` or the game in `inkwell.config.*`:
+
+```bash
+inkwell status
+inkwell logs --follow
+inkwell logs --level error
+```
 
 GitHub Actions does not need a saved Inkwell token when the repository is
 connected to the game. Grant the workflow `id-token: write`; the CLI exchanges
@@ -85,7 +93,7 @@ Useful management commands:
 inkwell games list
 inkwell games show --game my-game
 inkwell games update --game my-game --title "New title" --summary "New summary"
-inkwell games media upload new-cover.png --game my-game --kind cover --alt "Game cover"
+inkwell games media upload new-cover.png --game my-game --kind cover --alt "Game cover" --focal-x 50 --focal-y 35
 inkwell games media upload room.png --game my-game --kind screenshot --alt "A dungeon room"
 ```
 
