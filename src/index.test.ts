@@ -333,3 +333,8 @@ void test("loads a project config and bundles backend dependencies", async () =>
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('game metadata accepts optional community links and explicit clearing', async () => {
+  assert.deepEqual(await gameMetadataFromArgs(['--website', 'https://example.com', '--discord', 'https://discord.gg/game']), { websiteUrl: 'https://example.com', discordUrl: 'https://discord.gg/game' });
+  assert.deepEqual(await gameMetadataFromArgs(['--website', '', '--discord', '']), { websiteUrl: null, discordUrl: null });
+});
