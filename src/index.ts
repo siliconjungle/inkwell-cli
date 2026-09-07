@@ -836,6 +836,8 @@ type GameMetadata = {
   description?: string | null;
   genreTags?: string[];
   longDescriptionMarkdown?: string | null;
+  websiteUrl?: string | null;
+  discordUrl?: string | null;
   visibility?: "private" | "unlisted" | "public";
 };
 
@@ -852,6 +854,10 @@ export async function gameMetadataFromArgs(args: string[], creating = false) {
   }
   if (title !== undefined) metadata.title = title.trim();
   if (summary !== undefined) metadata.description = summary.trim() || null;
+  const website = valueAfter(args, "--website");
+  const discord = valueAfter(args, "--discord");
+  if (website !== undefined) metadata.websiteUrl = website.trim() || null;
+  if (discord !== undefined) metadata.discordUrl = discord.trim() || null;
   if (tags !== undefined) {
     metadata.genreTags = [
       ...new Set(
@@ -1335,9 +1341,11 @@ Usage:
   inkwell games show --game <slug>
   inkwell games create --game <slug> --title <title> [--visibility private|unlisted]
     [--summary <text>] [--description-file README.md] [--tags action,multiplayer]
+    [--website https://example.com] [--discord https://discord.gg/server]
     [--cover cover.png] [--screenshot shot-1.png ...]
   inkwell games update --game <slug> [--title <title>] [--visibility private|unlisted|public]
     [--summary <text>] [--description-file README.md] [--tags action,multiplayer]
+    [--website https://example.com] [--discord https://discord.gg/server]
   inkwell games media upload <file> --game <slug> --kind cover|screenshot [--alt <text>]
     [--focal-x 0..100] [--focal-y 0..100]
   inkwell deploy [directory] [--game <slug>] [--publish]

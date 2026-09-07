@@ -188,3 +188,20 @@ node dist/index.js --help
 ## License
 
 MIT
+
+## Optional game community links
+
+Set a website and Discord invitation when creating a game or updating its page:
+
+```sh
+inkwell games update --game my-game --website https://example.com --discord https://discord.gg/example
+# Clear either link; omission preserves its current value.
+inkwell games update --game my-game --website "" --discord ""
+```
+
+These flags also work with `inkwell games create`. Website URLs must use HTTP(S),
+and Discord must be an HTTPS invite such as `https://discord.gg/example` or
+`https://discord.com/invite/example`. Both fields are optional. Published links
+appear on the game page and are available through `Inkwell.game.get()` in SDK
+0.0.8 or newer. Run `inkwell docs feedback` for player feedback and creator inbox
+API guidance.
