@@ -200,3 +200,57 @@ test('shared OIDC workflow keeps preview --publish as a draft and publishes prod
     await rm(root,{recursive:true,force:true});
   }
 });
+
+void test('real CLI publishes devlog Markdown, reads posts and preserves revisions for updates', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'inkwell-devlog-command-'));
+  const markdown = '# New world\n\nPlay **together**.\n';
+  let post: Record<string, unknown> | null = null;
+  const calls: { method: string | undefined; url: string | undefined; body: Record<string, unknown> }[] = [];
+  const server = createServer(async (request, response) => {
+    const bytes: Buffer[] = [];
+    for await (const chunk of request) bytes.push(Buffer.from(chunk));
+    const body = bytes.length ? JSON.parse(Buffer.concat(bytes).toString()) : {};
+    calls.push({ method: request.method, url: request.url, body });
+    assert.equal(request.headers.authorization, 'Bearer local-command-test');
+    response.setHeader('content-type', 'application/json');
+    if (request.method === 'POST') {
+      assert.equal(body.bodyMarkdown, markdown.trim()); assert.equal(body.status, 'published');
+      post = { ...body, publicId: 'post123', revision: 1 };
+      response.statusCode = 201; response.end(JSON.stringify({ post }));
+    } else if (request.method === 'PATCH') {
+      if (body.revision !== post?.revision) { response.statusCode = 409; response.end(JSON.stringify({ error: 'This post changed.' })); return; }
+      post = { ...post, ...body, revision: Number(post?.revision) + 1 };
+      response.end(JSON.stringify({ post }));
+    } else if (request.method === 'DELETE') {
+      response.end(JSON.stringify({ deleted: true }));
+    } else response.end(JSON.stringify(request.url?.includes('?') ? { posts: [post], nextOffset: null } : { post }));
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address(); assert(address && typeof address !== 'string');
+  const apiUrl = `http://127.0.0.1:${address.port}`;
+  try {
+    await writeFile(join(root, 'UPDATE.md'), markdown);
+    await writeFile(join(root, 'inkwell.config.js'), 'export default { game: "devlog-game", client: { directory: "dist", entrypoint: "index.html", engine: { name: "web" } } };');
+    const created = await command(root, ['devlog', 'create', '--title', 'New world', '--body-file', 'UPDATE.md', '--publish', '--request-id', '12345678-1234-1234-1234-123456789abc'], apiUrl);
+    assert.equal(JSON.parse(created.stdout).post.publicId, 'post123');
+    assert.equal(calls[0].url, '/api/v1/games/devlog-game/devlogs', 'Resolves game from project config');
+    await command(root, ['devlog', 'update', '--game', 'devlog-game', '--post', 'post123', '--title', 'Edited'], apiUrl);
+    assert.equal(calls.at(-1)?.body.revision, 1); assert.equal(calls.at(-1)?.body.title, 'Edited');
+    await assert.rejects(command(root, ['devlog', 'update', '--game', 'devlog-game', '--post', 'post123', '--title', 'Stale', '--revision', '1'], apiUrl), /This post changed/);
+    await command(root, ['devlog', 'unpublish', '--game', 'devlog-game', '--post', 'post123'], apiUrl);
+    assert.equal(calls.at(-1)?.body.status, 'draft');
+    await command(root, ['devlog', 'publish', '--game', 'devlog-game', '--post', 'post123'], apiUrl);
+    assert.equal(calls.at(-1)?.body.status, 'published');
+    const listed = await command(root, ['devlog', 'list', '--game', 'devlog-game', '--offset', '20'], apiUrl);
+    assert.equal(JSON.parse(listed.stdout).posts.length, 1);
+    assert.equal(calls.at(-1)?.url, '/api/v1/games/devlog-game/devlogs?offset=20');
+    const shown = await command(root, ['devlog', 'show', '--game', 'devlog-game', '--post', 'post123'], apiUrl);
+    assert.equal(JSON.parse(shown.stdout).post.title, 'Edited');
+    const before = calls.length;
+    await assert.rejects(command(root, ['devlog', 'delete', '--game', 'devlog-game', '--post', 'post123'], apiUrl), /Pass --yes/);
+    assert.equal(calls.length, before, 'Delete without explicit --yes never makes a request');
+    await command(root, ['devlog', 'delete', '--game', 'devlog-game', '--post', 'post123', '--yes'], apiUrl);
+    assert.equal(calls.at(-1)?.method, 'DELETE');
+    assert.equal(calls.at(-1)?.body.revision, 4);
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); await rm(root, { recursive: true, force: true }); }
+});

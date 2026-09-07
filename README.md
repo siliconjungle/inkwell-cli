@@ -205,3 +205,36 @@ and Discord must be an HTTPS invite such as `https://discord.gg/example` or
 appear on the game page and are available through `Inkwell.game.get()` in SDK
 0.0.8 or newer. Run `inkwell docs feedback` for player feedback and creator inbox
 API guidance.
+
+## Creator devlogs (0.0.12)
+
+Publish development updates and release notes from a Markdown file:
+
+```sh
+# Defaults to a private draft.
+inkwell devlog create --game my-game --title "A bigger world" --body-file UPDATE.md
+inkwell devlog publish --game my-game --post POST_ID
+# Or create and publish together.
+inkwell devlog create --game my-game --title "This week's changes" --body-file UPDATE.md --publish
+inkwell devlog list --game my-game
+inkwell devlog show --game my-game --post POST_ID
+inkwell devlog update --game my-game --post POST_ID --body-file UPDATE.md
+inkwell devlog unpublish --game my-game --post POST_ID
+inkwell devlog delete --game my-game --post POST_ID --yes
+```
+
+All commands return JSON. `--game` can be omitted inside an Inkwell project.
+Use `--body` for inline Markdown instead of `--body-file`. Titles allow 160
+characters; bodies allow 40,000. List returns at most 20 posts and `nextOffset`;
+pass it to `list --offset` for the next page. `update` preserves omitted fields.
+
+Writes carry a revision to prevent concurrent overwrites. The CLI reads the
+current revision first, or you can pass `--revision N` from a prior inspection.
+On 409, fetch the post and reconcile changes before retrying. Creation accepts
+`--request-id UUID`; uncertain failures report the generated ID. Reusing that ID
+with the same content recovers the original post instead of duplicating it.
+
+Published devlogs appear on the game page and `/games/:slug/devlog`, with a
+permanent post URL and RSS feed for public/unlisted playable games. Drafts stay
+private to the owner. Publishing a post does not publish a build or change game
+visibility. Run `inkwell docs devlogs` for the API and full guide.

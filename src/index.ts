@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { devlogCommand } from "./devlog.js";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createReadStream, realpathSync } from "node:fs";
@@ -1337,6 +1338,12 @@ Usage:
   inkwell logs [--game <slug>] [--level debug|info|warn|error] [--follow]
   inkwell docs [topic] [--output file]
   inkwell init --game <slug> [--directory dist] [--engine godot|unity|web|unreal]
+  inkwell devlog list --game <slug> [--offset 0]
+  inkwell devlog show --game <slug> --post <id>
+  inkwell devlog create --game <slug> --title <title> --body-file POST.md [--publish] [--request-id <uuid>]
+  inkwell devlog update --game <slug> --post <id> [--title <title>] [--body-file POST.md] [--revision <n>]
+  inkwell devlog publish|unpublish --game <slug> --post <id> [--revision <n>]
+  inkwell devlog delete --game <slug> --post <id> --yes [--revision <n>]
   inkwell games list
   inkwell games show --game <slug>
   inkwell games create --game <slug> --title <title> [--visibility private|unlisted]
@@ -1413,6 +1420,11 @@ async function main() {
       );
       console.log("Created inkwell.config.js. Call Inkwell.ready() when the game is playable.");
       break;
+    }
+    case "devlog": {
+      const result = await devlogCommand(args, await gameForCommand(args.slice(1)), apiRequest);
+      console.log(JSON.stringify(result, null, 2));
+      return;
     }
     case "games":
       await gamesCommand(args);
