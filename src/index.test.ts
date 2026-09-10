@@ -24,6 +24,23 @@ import {
 
 const MEBIBYTE = 1024 * 1024;
 
+void test("packages 10,000 files and rejects the 10,001st", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "inkwell-file-limit-"));
+  try {
+    for (let start = 0; start < 10_000; start += 100) {
+      await Promise.all(Array.from({length: 100}, (_, offset) => {
+        const i = start + offset;
+        return writeFile(join(directory, i === 0 ? "index.html" : `asset-${i}.svg`), "x");
+      }));
+    }
+    assert.equal((await packageBuild(directory)).files.length, 10_000);
+    await writeFile(join(directory, "extra.svg"), "x");
+    await assert.rejects(packageBuild(directory), /more than 10000 files/);
+  } finally {
+    await rm(directory, {recursive: true, force: true});
+  }
+});
+
 void test("recognizes npm-style symlinked package binaries as the main module", async () => {
   const directory = await mkdtemp(join(tmpdir(), "inkwell-cli-entrypoint-test-"));
   try {

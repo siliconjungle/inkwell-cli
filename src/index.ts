@@ -18,7 +18,7 @@ import { build as esbuild } from "esbuild";
 
 const DEFAULT_API_URL = "https://inkwell.ing";
 const MAX_BUILD_BYTES = 1024 * 1024 * 1024;
-const MAX_BUILD_FILES = 2_000;
+const MAX_BUILD_FILES = 10_000;
 const MAX_BUILD_FILE_BYTES = MAX_BUILD_BYTES;
 const MAX_MULTIPART_BATCH_BYTES = 20 * 1024 * 1024;
 const MAX_BATCH_FILES = 20;

@@ -49,7 +49,7 @@ The same files are available at `https://inkwell.ing/docs.md` and
 
 ## Deploy a game
 
-Builds may contain up to 1 GiB of files and 2,000 files. The default entrypoint is `index.html`; configure a different HTML entrypoint when needed. Inkwell ignores development directories such as `.git`, `.next`, and `node_modules`. Large files upload in resumable chunks; repeating the same command resumes verified chunks. Files keep their original names. Precompressed gzip/Brotli files retain the correct content type and encoding; Unity `.unityweb` fallback files are left for its loader to decompress.
+Builds may contain up to 1 GiB of files and 10,000 files. The default entrypoint is `index.html`; configure a different HTML entrypoint when needed. Inkwell ignores development directories such as `.git`, `.next`, and `node_modules`. Large files upload in resumable chunks; repeating the same command resumes verified chunks. Files keep their original names. Precompressed gzip/Brotli files retain the correct content type and encoding; Unity `.unityweb` fallback files are left for its loader to decompress.
 
 Content-addressed PUT uploads retry network failures and HTTP 500/502/503/504
 up to three times with backoff. Each attempt has a two-minute timeout. The same
