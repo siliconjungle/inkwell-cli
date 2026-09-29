@@ -238,3 +238,17 @@ Published devlogs appear on the game page and `/games/:slug/devlog`, with a
 permanent post URL and RSS feed for public/unlisted playable games. Drafts stay
 private to the owner. Publishing a post does not publish a build or change game
 visibility. Run `inkwell docs devlogs` for the API and full guide.
+
+
+## Mod listings
+
+Mods are separate from hosted games. Every player can publish by default, without game creator approval. Link only mod components and media you have the rights to share, with installation instructions for a lawfully obtained base game. No mod files or game builds are uploaded.
+
+Use `inkwell mods create|update|list|show|browse|publish|unpublish|delete`. Run `inkwell docs mods` for metadata fields, screenshots/video links, permissions and examples.
+
+```sh
+inkwell mods create --mod my-mod --title "My Mod" --base-game "Example Game" --repository https://github.com/me/my-mod --install-file INSTALL.md
+inkwell mods publish --mod my-mod --rights-confirmed
+```
+
+See [mod publishing documentation](https://inkwell.ing/docs/mods).

@@ -254,3 +254,48 @@ void test('real CLI publishes devlog Markdown, reads posts and preserves revisio
     assert.equal(calls.at(-1)?.body.revision, 4);
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); await rm(root, { recursive: true, force: true }); }
 });
+
+test('real CLI manages external mod metadata without entering game upload paths', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'inkwell-mod-command-'));
+  const paths: string[] = [];
+  let mod: Record<string, unknown> | null = null;
+  const server = createServer(async (request, response) => {
+    paths.push(request.url || '');
+    assert.equal(request.headers.authorization, 'Bearer local-command-test');
+    const bytes: Buffer[] = [];
+    for await (const chunk of request) bytes.push(Buffer.from(chunk));
+    const body = bytes.length ? JSON.parse(Buffer.concat(bytes).toString()) : null;
+    response.setHeader('content-type', 'application/json');
+    if (request.method === 'POST') {
+      mod = {...body, revision:1}; response.statusCode = 201;
+    } else if (request.method === 'PATCH') {
+      assert.equal(body.revision, mod?.revision);
+      mod = {...mod,...body,revision:Number(mod?.revision)+1};
+    } else if (request.method === 'DELETE') {
+      response.end(JSON.stringify({deleted:true})); return;
+    }
+    response.end(JSON.stringify({mod}));
+  });
+  await new Promise<void>(resolve => server.listen(0,'127.0.0.1',resolve));
+  const address = server.address(); assert(address && typeof address !== 'string');
+  const apiUrl = `http://127.0.0.1:${address.port}`;
+  try {
+    await writeFile(join(root,'INSTALL.md'),'Install the patch on your own copy.');
+    await writeFile(join(root,'media.json'), JSON.stringify({screenshots:[{url:'https://example.com/shot.jpg',caption:'New map'}]}));
+    const created = await command(root,['mods','create','--mod','my-mod','--title','My Mod','--base-game','Old Game','--repository','https://github.com/me/mod','--install-file','INSTALL.md','--metadata','media.json'],apiUrl);
+    const saved = JSON.parse(created.stdout).mod;
+    assert.equal(saved.visibility,'draft');
+    assert.equal(saved.installationMarkdown,'Install the patch on your own copy.');
+    assert.equal(saved.screenshots[0].url,'https://example.com/shot.jpg');
+    await assert.rejects(command(root,['mods','publish','--mod','my-mod'],apiUrl), /rights-confirmed/);
+    assert.equal(paths.length,1);
+    const published = await command(root,['mods','publish','--mod','my-mod','--rights-confirmed'],apiUrl);
+    assert.equal(JSON.parse(published.stdout).mod.visibility,'public');
+    assert.equal(JSON.parse(published.stdout).mod.revision,2);
+    await command(root,['mods','delete','--mod','my-mod','--yes'],apiUrl);
+    assert(paths.every(path => path === '/api/v1/mods' || path === '/api/v1/mods/my-mod'));
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(root,{recursive:true,force:true});
+  }
+});
