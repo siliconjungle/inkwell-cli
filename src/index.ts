@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { modsCommand } from "./mods.js";
 import { devlogCommand } from "./devlog.js";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -571,6 +572,7 @@ async function whoami() {
   const username = typeof profile.username === "string" ? `@${profile.username}` : "Unknown user";
   const email = typeof profile.email === "string" ? ` (${profile.email})` : "";
   console.log(`${username}${email}`);
+  console.log(`Can publish mods: ${profile.canPublishMods ? "yes" : "no"}`);
   console.log(
     profile.hasCreatorAccess
       ? "Creator access: approved"
@@ -1344,6 +1346,17 @@ Usage:
   inkwell devlog update --game <slug> --post <id> [--title <title>] [--body-file POST.md] [--revision <n>]
   inkwell devlog publish|unpublish --game <slug> --post <id> [--revision <n>]
   inkwell devlog delete --game <slug> --post <id> --yes [--revision <n>]
+  inkwell mods list|browse [--offset 0] [--query text] [--base-game title]
+  inkwell mods show --mod <slug>
+  inkwell mods create --mod <slug> --title <title> --base-game <title>
+    [--repository https://github.com/owner/repo] [--project https://example.com]
+    [--download https://example.com/releases] [--install-file INSTALL.md]
+    [--description-file README.md] [--cover-url https://example.com/cover.jpg]
+    [--metadata mod.json] [--visibility draft|unlisted|public] [--rights-confirmed]
+  inkwell mods update --mod <slug> [metadata flags] [--revision N] [--rights-confirmed]
+  inkwell mods publish --mod <slug> --rights-confirmed
+  inkwell mods unpublish --mod <slug>
+  inkwell mods delete --mod <slug> --yes
   inkwell games list
   inkwell games show --game <slug>
   inkwell games create --game <slug> --title <title> [--visibility private|unlisted]
@@ -1426,6 +1439,9 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
       return;
     }
+    case "mods":
+      console.log(JSON.stringify(await modsCommand(args, apiRequest), null, 2));
+      break;
     case "games":
       await gamesCommand(args);
       break;
